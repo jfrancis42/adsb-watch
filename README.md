@@ -23,8 +23,10 @@ N12ABC   A012BC N12ABC   CESSNA     172S       SMITH JOHN R     PARKED   KAPA  -
 - A demodulator on the SDR host:
   - `readsb` (recommended — modern wiedehopf fork)
   - `dump1090-fa`, `dump1090-mutability`, or `dump1090`
-- A running [govt-data](../govt-data/) instance for FAA registry, airport,
-  runway, frequency, and navaid data (default: `http://localhost:8091`)
+- Network access to a govt-data instance for FAA registry, airport,
+  runway, frequency, and navaid data. Defaults to the public instance at
+  `https://data.n0gq.org` — no setup required. Stand up your own via
+  [govt-data](../govt-data/) and override with `--govt-data-url`.
 - `gpsd` (or pin the observer with `--fixed-lat/--fixed-lon`)
 - Python 3.10+, `pip install -r requirements.txt`
 
@@ -130,7 +132,7 @@ Most everything is overridable via flag or `$ENV`:
 | `--gpsd-host`         | `GPSD_HOST`        | `127.0.0.1`             |
 | `--gpsd-port`         | `GPSD_PORT`        | `2947`                  |
 | `--fixed-lat/-lon/-alt-ft` | —             | skip gpsd, pin observer |
-| `--govt-data-url`     | `GOVT_DATA_URL`    | `http://localhost:8091` |
+| `--govt-data-url`     | `GOVT_DATA_URL`    | `https://data.n0gq.org` |
 | `--cache-path`        | `ADSB_CACHE_PATH`  | `$XDG_CACHE_HOME/adsb-watch/registry.json` |
 | `--cache-ttl-days`    | `ADSB_CACHE_TTL_S` | 7 days                  |
 | `--no-cache`          | —                  | on-disk cache enabled   |
