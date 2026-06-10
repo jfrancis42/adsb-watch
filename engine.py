@@ -10,7 +10,8 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
-from geo import haversine_nm, bearing_deg, elevation_deg, closest_approach
+from geo import (haversine_nm, bearing_deg, elevation_deg,
+                 closest_approach, dead_reckon)
 import phase as phase_mod
 
 
@@ -77,6 +78,8 @@ class Track:
     cpa_azimuth_deg: Optional[float]   # bearing from observer to CPA point
     closing: bool
     age_s: float
+    predicted: bool = False            # True when lat/lon/alt are dead-reckoned, not freshly reported
+    predicted_age_s: float = 0.0       # how long the position has been dead-reckoned
     phase: str = 'AIRBORNE'            # PARKED/TAXI/TAKEOFF/LANDING/APPROACH/DEPART/AIRBORNE
     airport: Optional[str] = None      # ICAO ident of the airport, if any
     runway:  Optional[str] = None      # e.g. "25L"
@@ -248,18 +251,39 @@ class Engine:
     # velocity report from yanking the time-to-CPA across the screen.
     _CPA_ALPHA = 0.3
 
+    # Aircraft positions older than this (in seconds) are considered "stale"
+    # — we still display them by dead-reckoning forward, but the UI marks
+    # them as predicted rather than real.
+    PREDICT_STALE_THRESHOLD_S = 3.0
+
     def _track_for(self, a: Aircraft, obs: Observer, now: float) -> Track:
+        # Dead-reckon position forward from the last real fix. We don't
+        # mutate the Aircraft (real reports must be the only thing that
+        # writes lat/lon/alt) — we hand the projected values into the
+        # snapshot so geometry / phase / CPA all use them.
+        elapsed = max(0.0, now - a.last_pos)
+        if a.lat is not None and a.lon is not None:
+            dr_lat, dr_lon, dr_alt = dead_reckon(
+                a.lat, a.lon, a.alt_ft,
+                a.course_deg, a.speed_kt, a.vrate_fpm,
+                elapsed_s=elapsed)
+        else:
+            dr_lat = dr_lon = dr_alt = None
+
+        predicted_age = elapsed
+        is_predicted = elapsed >= self.PREDICT_STALE_THRESHOLD_S
+
         dist = az = el = None
         cpa_d = cpa_t = cpa_az = None
         closing = False
         have_obs = obs.lat is not None and obs.lon is not None
-        have_pos = a.lat is not None and a.lon is not None
+        have_pos = dr_lat is not None and dr_lon is not None
         if have_obs and have_pos:
-            dist = haversine_nm(obs.lat, obs.lon, a.lat, a.lon)
-            az   = bearing_deg(obs.lat, obs.lon, a.lat, a.lon)
-            el   = elevation_deg(dist, obs.alt_ft, a.alt_ft or 0.0)
+            dist = haversine_nm(obs.lat, obs.lon, dr_lat, dr_lon)
+            az   = bearing_deg(obs.lat, obs.lon, dr_lat, dr_lon)
+            el   = elevation_deg(dist, obs.alt_ft, dr_alt or 0.0)
             if a.course_deg is not None and a.speed_kt:
-                pred = closest_approach(obs.lat, obs.lon, a.lat, a.lon,
+                pred = closest_approach(obs.lat, obs.lon, dr_lat, dr_lon,
                                         a.course_deg, a.speed_kt)
                 if pred is not None:
                     cpa_d, cpa_t, cpa_az = self._smooth_cpa(a, now, *pred)
@@ -268,21 +292,22 @@ class Engine:
                     self._reset_cpa(a)
             else:
                 self._reset_cpa(a)
-        # Phase / airport / runway classification — facilities may be None
-        # if we haven't fetched yet (no GPS fix or no network). The classifier
-        # handles None gracefully and just returns AIRBORNE.
+        # Phase classification uses the projected position so a parked
+        # aircraft on the apron stays "PARKED" smoothly between updates.
         ph = phase_mod.classify(
-            lat=a.lat, lon=a.lon, alt_ft=a.alt_ft,
+            lat=dr_lat, lon=dr_lon, alt_ft=dr_alt,
             course_deg=a.course_deg, speed_kt=a.speed_kt,
             vrate_fpm=a.vrate_fpm, facilities=self._facilities)
 
         return Track(
             icao=a.icao, callsign=a.callsign,
-            lat=a.lat, lon=a.lon,
-            course_deg=a.course_deg, speed_kt=a.speed_kt, alt_ft=a.alt_ft,
+            lat=dr_lat, lon=dr_lon,
+            course_deg=a.course_deg, speed_kt=a.speed_kt, alt_ft=dr_alt,
             distance_nm=dist, azimuth_deg=az, elevation_deg=el,
             cpa_nm=cpa_d, cpa_seconds=cpa_t, cpa_azimuth_deg=cpa_az,
             closing=closing,
+            predicted=is_predicted,
+            predicted_age_s=predicted_age,
             phase=ph.phase, airport=ph.airport_ident,
             runway=ph.runway, phase_detail=ph.detail,
             age_s=now - a.last_seen,

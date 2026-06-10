@@ -27,7 +27,7 @@ COLUMNS = [
     ('AZ',     4),
     ('EL',     5),
     ('CPA(az/nm/eta)', 18),
-    ('AGE',    4),
+    ('AGE',    5),   # extra column for the predicted-marker suffix '*'
 ]
 
 SORT_NOW = 'now'   # current straight-line distance
@@ -73,7 +73,9 @@ def _fmt(track) -> list[str]:
         f(track.azimuth_deg, '4.0f'),
         f(track.elevation_deg, '5.1f'),
         _fmt_cpa(track),
-        f'{track.age_s:4.1f}',
+        # '*' suffix flags a dead-reckoned row, in case A_DIM is invisible
+        # on the terminal in use.
+        f'{track.age_s:4.1f}{"*" if track.predicted else " "}',
     ]
 
 
@@ -211,9 +213,16 @@ def _draw(stdscr, snap, sort_mode):
     for track in tracks:
         if y >= h:
             break
-        attr = (curses.A_REVERSE
-                if _is_highlight(track, sort_mode, snap.cpa_threshold_nm)
-                else curses.A_NORMAL)
+        # Highlight (reverse video) takes precedence over predicted (dim);
+        # combining them is supported by curses but reads as muddy on most
+        # terminals. A closing aircraft you also can't see right now should
+        # still scream at you.
+        if _is_highlight(track, sort_mode, snap.cpa_threshold_nm):
+            attr = curses.A_REVERSE
+        elif track.predicted:
+            attr = curses.A_DIM
+        else:
+            attr = curses.A_NORMAL
         col = 0
         for value, (_, width) in zip(_fmt(track), COLUMNS):
             if col + width >= w:

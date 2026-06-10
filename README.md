@@ -99,12 +99,24 @@ aircraft *predicted to pass* within the threshold are highlighted.
 | CRS / SPD          | course (deg true), groundspeed (kt)                    |
 | DIST / AZ / EL     | from observer: distance (NM), azimuth, elevation       |
 | CPA(az/nm/eta)     | predicted closest approach: bearing / NM / countdown   |
-| AGE                | seconds since last message                             |
+| AGE                | seconds since last message; suffixed with `*` when the displayed position is dead-reckoned (no fresh fix in 3+ s) |
 
 `-` in CPA means the aircraft is not approaching (no velocity, or already past CPA).
 `-` in PHASE means AIRBORNE (the boring default — only the interesting phases
 TAKEOFF / LANDING / APPROACH / DEPART / TAXI / PARKED render explicitly so they
 visually pop). `-` in APRT / RWY means no airport association.
+
+### Dead-reckoning
+
+The display redraws at 5 Hz. ADS-B reports come in at ~1 Hz at best, often
+slower. Between updates, each aircraft's lat / lon / altitude are projected
+forward from its last reported state using its course, ground speed, and
+vertical rate — so the table stays smooth.
+
+After **3 seconds** without a real update, the row is rendered dim and the
+AGE column gets a `*` suffix to mark the position as predicted rather than
+real. After **10 seconds** the aircraft is dropped from the display
+entirely (configurable via `--expiry`).
 
 ### Phase classifier
 

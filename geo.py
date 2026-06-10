@@ -28,6 +28,24 @@ def elevation_deg(distance_nm, observer_alt_ft, target_alt_ft):
         return 90.0 if dh_ft > 0 else (-90.0 if dh_ft < 0 else 0.0)
     return math.degrees(math.atan2(dh_ft, horiz_ft))
 
+def dead_reckon(lat, lon, alt_ft, course_deg, speed_kt, vrate_fpm, elapsed_s):
+    """Project an aircraft forward in time from its last reported state.
+
+    Returns (lat, lon, alt_ft). Missing course/speed → no horizontal motion;
+    missing vrate → no altitude change. The result is what the aircraft is
+    *probably* doing right now, assuming it held course/speed/climb.
+    """
+    new_lat, new_lon = lat, lon
+    if (course_deg is not None and speed_kt is not None
+            and speed_kt > 0 and elapsed_s > 0):
+        distance_nm = speed_kt * elapsed_s / 3600.0
+        new_lat, new_lon = project_position(lat, lon, course_deg, distance_nm)
+    new_alt = alt_ft
+    if vrate_fpm is not None and alt_ft is not None and elapsed_s > 0:
+        new_alt = alt_ft + vrate_fpm * elapsed_s / 60.0
+    return new_lat, new_lon, new_alt
+
+
 def project_position(lat, lon, course_deg, distance_nm):
     """Walk `distance_nm` along `course_deg` from (lat, lon)."""
     p1 = math.radians(lat)

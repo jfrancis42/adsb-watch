@@ -16,7 +16,7 @@ GOVT_DATA_PASS = os.environ.get('GOVT_DATA_PASS', '')
 
 EXPIRY_SECONDS   = float(os.environ.get('ADSB_EXPIRY',     '10.0'))
 CPA_HIGHLIGHT_NM = float(os.environ.get('CPA_HIGHLIGHT_NM','1.0'))
-REFRESH_HZ       = float(os.environ.get('REFRESH_HZ',      '4'))
+REFRESH_HZ       = float(os.environ.get('REFRESH_HZ',      '5'))
 
 # Persistent registry cache (FAA lookups via govt-data).
 _default_cache_dir = os.environ.get(
