@@ -97,6 +97,12 @@ class FacilitiesClient(threading.Thread):
     it via `client.snapshot()`; the engine never makes HTTP calls itself."""
     daemon = True
 
+    # Backoff schedule (seconds) when a refresh fails. Each consecutive
+    # failure advances one step; success resets to the start. Capped at
+    # 10 min so a long outage doesn't hammer the server but also doesn't
+    # leave the user waiting hours after the network comes back.
+    BACKOFF_SCHEDULE_S = (30, 60, 120, 300, 600)
+
     def __init__(self, base_url: str, user: str, password: str,
                  cache: RegistryCache,
                  radius_nm: float = 50.0,
@@ -117,6 +123,8 @@ class FacilitiesClient(threading.Thread):
         self._snapshot: Optional[Facilities] = None
         self._observer_provider = None  # callable -> (lat, lon) or None
         self.status = 'idle'
+        self._fail_count = 0
+        self._next_attempt_at = 0.0
 
     # ---- public API ------------------------------------------------------
 
@@ -162,7 +170,27 @@ class FacilitiesClient(threading.Thread):
                                f'drift {drift:.1f} NM)')
                 return
 
+        # Honour the backoff schedule — if a previous refresh failed, wait
+        # the prescribed time before trying again.
+        wait_s = self._next_attempt_at - time.time()
+        if wait_s > 0:
+            self.status = (f'backoff: retry in {wait_s:.0f}s '
+                           f'(fails={self._fail_count})')
+            return
+
         self._refresh(lat, lon)
+
+    def _record_failure(self, reason: str):
+        self._fail_count += 1
+        idx = min(self._fail_count - 1, len(self.BACKOFF_SCHEDULE_S) - 1)
+        delay = self.BACKOFF_SCHEDULE_S[idx]
+        self._next_attempt_at = time.time() + delay
+        self.status = (f'{reason}; retry in {delay}s '
+                       f'(fail #{self._fail_count})')
+
+    def _record_success(self):
+        self._fail_count = 0
+        self._next_attempt_at = 0.0
 
     def _refresh(self, lat: float, lon: float):
         key = f'facilities:{bucket_key(lat, lon)}:{int(self.radius_nm)}'
@@ -173,6 +201,7 @@ class FacilitiesClient(threading.Thread):
                            f'@ {bucket_key(lat, lon)}')
             with self._lock:
                 self._snapshot = facs
+            self._record_success()
             return
 
         self.status = f'fetching radius={self.radius_nm} NM @ {lat:.3f},{lon:.3f}'
@@ -181,7 +210,7 @@ class FacilitiesClient(threading.Thread):
                 f'/airports/near?lat={lat}&lon={lon}'
                 f'&radius_nm={self.radius_nm}&limit=500')
         except Exception as e:
-            self.status = f'airports fetch failed: {e}'
+            self._record_failure(f'airports fetch failed: {e}')
             return
 
         airports: list[Airport] = []
@@ -249,6 +278,7 @@ class FacilitiesClient(threading.Thread):
         with self._lock:
             self._snapshot = facs
         self.status = (f'fetched {len(airports)} airports + {len(navaids)} navaids')
+        self._record_success()
 
     # ---- HTTP helper -----------------------------------------------------
 
