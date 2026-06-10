@@ -3,8 +3,8 @@
 they emit. Run this if the curses UI shows zero tracks.
 
     python3 probe.py [host]                    # all known ports, host=127.0.0.1
-    python3 probe.py sdr-host.local                 # remote host
-    python3 probe.py sdr-host.local 30003 8080      # only the listed ports
+    python3 probe.py other-box.local                 # remote host
+    python3 probe.py other-box.local 30003 8080      # only the listed ports
 
 Probes all ports concurrently with a short connect timeout, so a firewalled
 host doesn't make the script wait one timeout per port serially.

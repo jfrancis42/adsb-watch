@@ -8,7 +8,7 @@ parked) against a 50-NM-radius airport database — both fed by the local
 
 ```
 observer:  39.5400, -104.7600  alt  5400 ft   tracks: 7   sort: current distance   highlight <= 1.0 NM   s=toggle sort  q=quit
-adsb-sbs: connected sdr-host.local:30003 (SBS-1) (12942 msgs) | facilities: fresh (13 airports, drift 0.4 NM) | dump1090: launched readsb (pid 1647272)
+adsb-sbs: connected 127.0.0.1:30003 (SBS-1) (12942 msgs) | facilities: fresh (13 airports, drift 0.4 NM) | dump1090: launched readsb (pid 1647272)
 
 CALL     ICAO   N#       MFG        MODEL      OWNER            PHASE    APRT  RWY  ALT     CRS  SPD  DIST   AZ   EL    CPA(az/nm/eta)     AGE
 UAL2179  AB1234 N2179U   BOEING     737-924    UNITED AIRLINE   APPROACH KDEN  25   6800   270  140   3.21  092   2.7   270/0.18/00:48    0.4
@@ -36,8 +36,8 @@ N12ABC   A012BC N12ABC   CESSNA     172S       SMITH JOHN R     PARKED   KAPA  -
 # Local SDR — auto-launches readsb/dump1090 in the background.
 python3 main.py
 
-# Remote SDR (RTL-SDR on another box, e.g. mother at sdr-host.local):
-python3 main.py --dump1090-host sdr-host.local --no-launch-dump1090
+# Remote SDR (RTL-SDR on another box on your LAN):
+python3 main.py --dump1090-host other-box.local --no-launch-dump1090
 
 # No GPS handy? Pin the observer:
 python3 main.py --fixed-lat 39.54 --fixed-lon -104.76 --fixed-alt-ft 5400
