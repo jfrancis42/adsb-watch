@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Local cache files written by adsb-watch at runtime
+registry.json
+facilities.json
