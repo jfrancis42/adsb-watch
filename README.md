@@ -24,11 +24,38 @@ N12ABC   A012BC N12ABC   CESSNA     172S       SMITH JOHN R     PARKED   KAPA  -
   - `readsb` (recommended — modern wiedehopf fork)
   - `dump1090-fa`, `dump1090-mutability`, or `dump1090`
 - Network access to a govt-data instance for FAA registry, airport,
-  runway, frequency, and navaid data. Defaults to the public instance at
-  `https://data.n0gq.org` — no setup required. Stand up your own via
-  [govt-data](../govt-data/) and override with `--govt-data-url`.
+  runway, frequency, and navaid data. Defaults to `https://data.n0gq.org`,
+  which requires HTTP Basic auth — see [Credentials](#credentials) below.
+  Stand up your own with [govt-data](https://github.com/jfrancis42/govt-data)
+  and override with `--govt-data-url`.
 - `gpsd` (or pin the observer with `--fixed-lat/--fixed-lon`)
 - Python 3.10+, `pip install -r requirements.txt`
+
+## Credentials
+
+`govt-data` requires HTTP Basic auth. The recommended way to provide
+credentials is via environment variables:
+
+```bash
+export GOVT_DATA_USER=yourusername
+export GOVT_DATA_PASS=yourpassword
+python3 main.py
+```
+
+Equivalently you can `unset GOVT_DATA_*` and the program will fall through
+to the empty defaults baked into `config.py`, which produces a `401` from
+the server — you'll see this in the curses status line as
+`facilities fetch failed: HTTP Error 401`. Set both vars and the failure
+clears on the next poll.
+
+For a one-off run without exporting:
+
+```bash
+GOVT_DATA_USER=u GOVT_DATA_PASS=p python3 main.py
+```
+
+If you need access to `data.n0gq.org` itself, ask the maintainer. The
+credentials are not bundled with this repository.
 
 ## Run it
 

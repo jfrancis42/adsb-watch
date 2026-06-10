@@ -6,11 +6,13 @@ DUMP1090_PORT = int(os.environ.get('DUMP1090_PORT', '30003'))  # SBS-1 BaseStati
 GPSD_HOST = os.environ.get('GPSD_HOST', '127.0.0.1')
 GPSD_PORT = int(os.environ.get('GPSD_PORT', '2947'))
 
-# Defaults point at the public govt-data instance at https://data.n0gq.org.
-# Override via environment / CLI flags to use your own.
+# govt-data is reachable at https://data.n0gq.org but requires HTTP Basic
+# auth. Set GOVT_DATA_USER and GOVT_DATA_PASS in your environment (or pass
+# --govt-data-* flags) — credentials are not bundled with this code. Ask
+# the maintainer for read-only access if you don't have a working pair.
 GOVT_DATA_URL  = os.environ.get('GOVT_DATA_URL',  'https://data.n0gq.org')
-GOVT_DATA_USER = os.environ.get('GOVT_DATA_USER', 'aprs')
-GOVT_DATA_PASS = os.environ.get('GOVT_DATA_PASS', '***REDACTED***')
+GOVT_DATA_USER = os.environ.get('GOVT_DATA_USER', '')
+GOVT_DATA_PASS = os.environ.get('GOVT_DATA_PASS', '')
 
 EXPIRY_SECONDS   = float(os.environ.get('ADSB_EXPIRY',     '10.0'))
 CPA_HIGHLIGHT_NM = float(os.environ.get('CPA_HIGHLIGHT_NM','1.0'))
