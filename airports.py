@@ -143,6 +143,15 @@ class FacilitiesClient(threading.Thread):
     # ---- thread loop -----------------------------------------------------
 
     def run(self):
+        # Wait a few seconds for GPS to get a fix, then try to load from cache
+        import time as _t
+        _t.sleep(5.0)
+
+        try:
+            self._tick()
+        except Exception as e:
+            self.status = f'error: {type(e).__name__}: {e}'
+
         while not self._stop.is_set():
             try:
                 self._tick()

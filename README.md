@@ -59,6 +59,8 @@ credentials are not bundled with this repository.
 
 ## Run it
 
+### Curses UI (default)
+
 ```bash
 # Local SDR — auto-launches readsb/dump1090 in the background.
 python3 main.py
@@ -74,7 +76,26 @@ The auto-launcher tries `readsb`, `dump1090-fa`, `dump1090-mutability`,
 `dump1090` in that order. If port 30003 is already serving (e.g. systemd unit),
 it leaves it alone and just connects.
 
-### Keys
+### Web radar UI
+
+```bash
+# Launch web UI with CRT phosphor effect
+python3 main.py --web --fixed-lat 39.54 --fixed-lon -104.76 --fixed-alt-ft 5400
+
+# Then open http://localhost:8080/radar.html in your browser
+```
+
+The web UI displays a circular radar scope with:
+- Green phosphor CRT effect with persistence/fade
+- Aircraft as arrows pointing in direction of flight
+- 30-second position trails
+- Range rings (default 5 NM radius with 1 NM intervals)
+- North-up orientation with observer at center
+- Aircraft labels showing altitude (ft), speed (mph), and type
+
+WebSocket server runs on port 8765, HTTP server on 8080 (override with `--web-port` / `--http-port`).
+
+### Keys (curses UI)
 
 | key       | action                                              |
 |-----------|-----------------------------------------------------|
