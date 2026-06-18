@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ADS-B Radar - Demo Mode</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #000;
+            color: #0f0;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+        }
+
+        #container {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #status {
+            padding: 10px;
+            background: #001100;
+            border-bottom: 1px solid #0f0;
+            font-size: 12px;
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+        }
+
+        #status .left, #status .right {
+            display: flex;
+            gap: 20px;
+        }
+
+        #canvas-container {
+            flex: 1;
+            position: relative;
+            background: #000;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .connected {
+            color: #0f0;
+        }
+
+        /* CRT scanline effect */
+        #canvas-container::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.15),
+                rgba(0, 0, 0, 0.15) 1px,
+                transparent 1px,
+                transparent 2px
+            );
+            pointer-events: none;
+        }
+
+        /* CRT glow */
+        canvas {
+            filter: blur(0.3px) contrast(1.1) brightness(1.05);
+        }
+
+        #demo-note {
+            position: absolute;
+            top: 50px;
+            right: 20px;
+            background: rgba(0, 17, 0, 0.8);
+            padding: 10px;
+            border: 1px solid #0f0;
+            font-size: 11px;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="status">
+            <div class="left">
+                <span class="connected">DEMO MODE</span>
+                <span id="observer-pos">Observer: 39.5400, -104.7600 @ 5400 ft</span>
+                <span id="track-count">Tracks: 4</span>
+            </div>
+            <div class="right">
+                <span>Range: 5.0 NM</span>
+                <span>Trail: 30s</span>
+            </div>
+        </div>
+        <div id="canvas-container">
+            <canvas id="radar"></canvas>
+            <div id="demo-note">
+                DEMO MODE<br>
+                Simulated aircraft with trails<br>
+                Launch real radar with:<br>
+                python3 main.py --web
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Demo radar with simulated aircraft
+        const PHOSPHOR_GREEN = '#00ff00';
+        const GRID_COLOR = '#003300';
+        const TEXT_COLOR = '#00ff00';
+        const TRAIL_COLOR = '#006600';
+        const BACKGROUND = '#000000';
+
+        const canvas = document.getElementById('radar');
+        const ctx = canvas.getContext('2d');
+        const fadeCanvas = document.createElement('canvas');
+        const fadeCtx = fadeCanvas.getContext('2d');
+
+        let cx, cy, radius, pixelsPerNM;
+        const rangeNM = 5.0;
+        const observer = { lat: 39.54, lon: -104.76, alt_ft: 5400 };
+
+        // Simulated aircraft
+        const aircraft = [
+            { callsign: 'UAL2179', course: 270, speed_kt: 140, alt_ft: 6800,
+              distNM: 3.2, azimuth: 92, type: 'B737', trail: [] },
+            { callsign: 'SWA431', course: 170, speed_kt: 150, alt_ft: 5500,
+              distNM: 2.1, azimuth: 155, type: 'B737', trail: [] },
+            { callsign: 'N12ABC', course: 0, speed_kt: 0, alt_ft: 5870,
+              distNM: 4.5, azimuth: 175, type: 'C172', trail: [] },
+            { callsign: 'FFT123', course: 45, speed_kt: 180, alt_ft: 7200,
+              distNM: 1.8, azimuth: 30, type: 'A320', trail: [] },
+        ];
+
+        function resize() {
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            fadeCanvas.width = rect.width;
+            fadeCanvas.height = rect.height;
+
+            cx = canvas.width / 2;
+            cy = canvas.height / 2;
+            radius = Math.min(cx, cy) * 0.9;
+            pixelsPerNM = radius / rangeNM;
+        }
+
+        function drawGrid() {
+            ctx.save();
+            ctx.translate(cx, cy);
+
+            // Range rings
+            ctx.strokeStyle = GRID_COLOR;
+            ctx.lineWidth = 1;
+            for (let r = 1; r <= rangeNM; r++) {
+                const rad = r * pixelsPerNM;
+                ctx.beginPath();
+                ctx.arc(0, 0, rad, 0, Math.PI * 2);
+                ctx.stroke();
+
+                ctx.fillStyle = TEXT_COLOR;
+                ctx.font = '12px "Courier New"';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'bottom';
+                ctx.fillText(`${r} NM`, 0, -rad - 5);
+            }
+
+            // Cardinal directions
+            const compassRadius = radius * 1.05;
+            ctx.fillStyle = TEXT_COLOR;
+            ctx.font = '16px "Courier New"';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('N', 0, -compassRadius);
+            ctx.fillText('S', 0, compassRadius);
+            ctx.textAlign = 'left';
+            ctx.fillText('E', compassRadius, 0);
+            ctx.textAlign = 'right';
+            ctx.fillText('W', -compassRadius, 0);
+
+            // Center crosshairs
+            ctx.strokeStyle = PHOSPHOR_GREEN;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-10, 0);
+            ctx.lineTo(10, 0);
+            ctx.moveTo(0, -10);
+            ctx.lineTo(0, 10);
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        function polarToXY(distNM, azimuthDeg) {
+            const azRad = azimuthDeg * Math.PI / 180;
+            const dist = distNM * pixelsPerNM;
+            return {
+                x: dist * Math.sin(azRad),
+                y: -dist * Math.cos(azRad)
+            };
+        }
+
+        function drawAircraft(ac) {
+            const pos = polarToXY(ac.distNM, ac.azimuth);
+            const courseRad = ac.course * Math.PI / 180;
+
+            ctx.save();
+            ctx.translate(cx + pos.x, cy + pos.y);
+
+            // Draw trail
+            if (ac.trail.length > 1) {
+                ctx.strokeStyle = TRAIL_COLOR;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                for (let i = 0; i < ac.trail.length; i++) {
+                    const tp = ac.trail[i];
+                    if (i === 0) ctx.moveTo(tp.x - pos.x, tp.y - pos.y);
+                    else ctx.lineTo(tp.x - pos.x, tp.y - pos.y);
+                }
+                ctx.stroke();
+            }
+
+            // Draw arrow
+            ctx.rotate(courseRad);
+            ctx.fillStyle = PHOSPHOR_GREEN;
+            ctx.strokeStyle = PHOSPHOR_GREEN;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, -12);
+            ctx.lineTo(-6, 6);
+            ctx.lineTo(0, 2);
+            ctx.lineTo(6, 6);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.rotate(-courseRad);
+
+            // Label
+            const speedMph = Math.round(ac.speed_kt * 1.15078);
+            ctx.fillStyle = TEXT_COLOR;
+            ctx.font = '10px "Courier New"';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.fillText(`${ac.alt_ft}' ${speedMph}mph`, 15, -12);
+            ctx.fillText(ac.type, 15, 0);
+
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(ac.callsign, 15, -15);
+
+            ctx.restore();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Phosphor persistence
+            ctx.drawImage(fadeCanvas, 0, 0);
+            fadeCtx.fillStyle = 'rgba(0, 0, 0, 0.08)';
+            fadeCtx.fillRect(0, 0, fadeCanvas.width, fadeCanvas.height);
+            fadeCtx.drawImage(canvas, 0, 0);
+
+            ctx.fillStyle = BACKGROUND;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            drawGrid();
+
+            // Update and draw aircraft
+            for (const ac of aircraft) {
+                // Move aircraft slowly
+                ac.azimuth += 0.1;
+                ac.distNM += Math.sin(Date.now() / 1000 + ac.azimuth) * 0.005;
+                ac.distNM = Math.max(0.5, Math.min(rangeNM - 0.5, ac.distNM));
+
+                const pos = polarToXY(ac.distNM, ac.azimuth);
+                ac.trail.push({ x: pos.x, y: pos.y });
+                if (ac.trail.length > 120) ac.trail.shift();
+
+                drawAircraft(ac);
+            }
+        }
+
+        resize();
+        window.addEventListener('resize', resize);
+        animate();
+    </script>
+</body>
+</html>

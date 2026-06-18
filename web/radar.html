@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ADS-B Radar Display</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #000;
+            color: #0f0;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+        }
+
+        #container {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #status {
+            padding: 10px;
+            background: #001100;
+            border-bottom: 1px solid #0f0;
+            font-size: 12px;
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+        }
+
+        #status .left, #status .right {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+
+        /* Indicator lights */
+        .indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .indicator-light {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #300;
+            border: 1px solid #500;
+        }
+
+        .indicator-light.on {
+            background: #0f0;
+            border-color: #0f0;
+            box-shadow: 0 0 5px #0f0;
+        }
+
+        /* Dropdown controls */
+        select {
+            background: #001100;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 2px 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        select:focus {
+            outline: none;
+            box-shadow: 0 0 3px #0f0;
+        }
+
+        select option {
+            background: #001100;
+            color: #0f0;
+        }
+
+        /* Sound checkboxes */
+        input[type="checkbox"] {
+            appearance: none;
+            width: 14px;
+            height: 14px;
+            border: 1px solid #0f0;
+            background: #001100;
+            cursor: pointer;
+            position: relative;
+            vertical-align: middle;
+            margin-right: 3px;
+        }
+
+        input[type="checkbox"]:checked::after {
+            content: '✓';
+            position: absolute;
+            color: #0f0;
+            font-size: 12px;
+            top: -2px;
+            left: 1px;
+        }
+
+        label {
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        #canvas-container {
+            flex: 1;
+            position: relative;
+            background: #000;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .disconnected {
+            color: #f00;
+        }
+
+        .connected {
+            color: #0f0;
+        }
+
+        /* CRT scanline effect */
+        #canvas-container::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.15),
+                rgba(0, 0, 0, 0.15) 1px,
+                transparent 1px,
+                transparent 2px
+            );
+            pointer-events: none;
+        }
+
+        /* CRT glow */
+        canvas {
+            filter: blur(0.3px) contrast(1.1) brightness(1.05);
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="status">
+            <div class="left">
+                <span id="observer-pos">Observer: --</span>
+                <span id="track-count">Tracks: 0</span>
+            </div>
+            <div class="right">
+                <span>
+                    Range:
+                    <select id="range-select">
+                        <option value="1">1 NM</option>
+                        <option value="2">2 NM</option>
+                        <option value="5" selected>5 NM</option>
+                        <option value="10">10 NM</option>
+                        <option value="20">20 NM</option>
+                        <option value="50">50 NM</option>
+                        <option value="100">100 NM</option>
+                    </select>
+                </span>
+                <span>
+                    Trail:
+                    <select id="trail-select">
+                        <option value="0">None</option>
+                        <option value="10">10s</option>
+                        <option value="30" selected>30s</option>
+                        <option value="60">1 min</option>
+                        <option value="120">2 min</option>
+                        <option value="300">5 min</option>
+                        <option value="-1">Full</option>
+                    </select>
+                </span>
+                <span>
+                    Projection:
+                    <select id="projection-select">
+                        <option value="0">None</option>
+                        <option value="15">15s</option>
+                        <option value="30">30s</option>
+                        <option value="60" selected>60s</option>
+                    </select>
+                </span>
+                <span>
+                    Alert Range:
+                    <select id="alert-range-select">
+                        <option value="0">None</option>
+                        <option value="0.5">0.5 NM</option>
+                        <option value="1" selected>1 NM</option>
+                        <option value="2">2 NM</option>
+                        <option value="3">3 NM</option>
+                        <option value="5">5 NM</option>
+                    </select>
+                </span>
+                <span class="indicator">
+                    <span class="indicator-light" id="adsb-light"></span>
+                    <span>ADS-B</span>
+                </span>
+                <span class="indicator">
+                    <span class="indicator-light" id="gps-light"></span>
+                    <span>GPS</span>
+                </span>
+                <span>
+                    <label><input type="checkbox" id="sound-approaching" checked> Approaching</label>
+                </span>
+                <span>
+                    <label><input type="checkbox" id="sound-enter" checked> Enter</label>
+                </span>
+                <span>
+                    <label><input type="checkbox" id="sound-leave" checked> Leave</label>
+                </span>
+            </div>
+        </div>
+        <div id="canvas-container">
+            <canvas id="radar"></canvas>
+        </div>
+    </div>
+
+    <script src="radar.js"></script>
+</body>
+</html>

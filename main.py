@@ -10,6 +10,7 @@ import argparse
 import config
 import os
 from airports import FacilitiesClient
+from audio import AudioAlerter
 from cache import RegistryCache
 from engine import Engine
 from feed_adsb import SbsFeeder, AvrFeeder
@@ -18,10 +19,17 @@ from launcher import Dump1090Launcher
 from registry import RegistryClient
 import threading
 import ui_curses
+import ui_web
 
 
 def main():
     p = argparse.ArgumentParser(description='ADS-B watcher with FAA registry overlay')
+    p.add_argument('--web', action='store_true',
+                   help='Launch web radar UI instead of curses (http://localhost:8086/radar.html)')
+    p.add_argument('--web-port', type=int, default=8765,
+                   help='WebSocket port for web UI (default 8765)')
+    p.add_argument('--http-port', type=int, default=8086,
+                   help='HTTP port for web UI (default 8086)')
     p.add_argument('--dump1090-host', default=config.DUMP1090_HOST)
     p.add_argument('--dump1090-port', type=int, default=config.DUMP1090_PORT,
                    help='Port to connect to (default 30003 SBS-1, or 30002 with --avr)')
@@ -49,6 +57,12 @@ def main():
                    help='How long cached registry entries are reused (default 7).')
     p.add_argument('--no-cache',      action='store_true',
                    help='Disable the on-disk registry cache for this run.')
+    p.add_argument('--audio-flag',    action='store_true',
+                   help='Play an audible "ding ding ding" when an aircraft is '
+                        'within ~1 minute of passing within the CPA threshold '
+                        '(default 1 NM, see --cpa-nm). One alert per pass.')
+    p.add_argument('--audio-lead-s',  type=float, default=60.0,
+                   help='Seconds-to-CPA threshold for the audible alert.')
     args = p.parse_args()
 
     cache = facility_cache = None
@@ -115,13 +129,23 @@ def main():
         gps = GpsFeeder(engine, args.gpsd_host, args.gpsd_port)
         gps.start()
 
+    audio = None
+    if args.audio_flag:
+        audio = AudioAlerter(engine, lead_time_s=args.audio_lead_s)
+        audio.start()
+
     try:
-        ui_curses.run(engine, args.refresh_hz)
+        if args.web:
+            ui_web.run(engine, args.refresh_hz, port=args.web_port, http_port=args.http_port)
+        else:
+            ui_curses.run(engine, args.refresh_hz)
     finally:
         adsb.stop()
         reg.stop()
         if facilities:
             facilities.stop()
+        if audio:
+            audio.stop()
         if cache:
             cache.flush()
         if facility_cache:

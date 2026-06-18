@@ -98,6 +98,7 @@ class Snapshot:
     generated_at: float
     feeders: dict  # {feeder_name: status_string}
     counts:  dict  # {feeder_name: messages_seen}
+    facilities: object = None  # airports.Facilities or None
 
 
 class Engine:
@@ -236,7 +237,8 @@ class Engine:
         return Snapshot(observer=obs, tracks=tracks,
                         cpa_threshold_nm=self.cpa_threshold_nm,
                         generated_at=now,
-                        feeders=feeders, counts=counts)
+                        feeders=feeders, counts=counts,
+                        facilities=self._facilities)
 
     # ----- internals -------------------------------------------------------
 
