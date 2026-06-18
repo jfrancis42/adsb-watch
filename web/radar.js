@@ -493,8 +493,18 @@ class RadarDisplay {
             const distanceNM = (track.speed_kt / 3600) * this.projectionSeconds;  // NM = kt * (seconds / 3600)
             const distancePx = distanceNM * this.pixelsPerNM;
 
-            const projX = pos.x + Math.sin(courseRad) * distancePx;
-            const projY = pos.y - Math.cos(courseRad) * distancePx;
+            let projX = pos.x + Math.sin(courseRad) * distancePx;
+            let projY = pos.y - Math.cos(courseRad) * distancePx;
+
+            // Clip projection line to radar edge
+            const projDist = Math.sqrt(projX * projX + projY * projY);
+            const showDot = projDist <= this.radius;
+            if (projDist > this.radius) {
+                // Clip to radar circle along the line direction
+                const clipped = this.clipLineToCircle(pos.x, pos.y, projX, projY);
+                projX = clipped.x;
+                projY = clipped.y;
+            }
 
             ctx.save();
             ctx.strokeStyle = 'rgba(0, 255, 0, 0.4)';
@@ -506,11 +516,13 @@ class RadarDisplay {
             ctx.stroke();
             ctx.setLineDash([]);
 
-            // Draw dot at projected position
-            ctx.fillStyle = PHOSPHOR_GREEN;
-            ctx.beginPath();
-            ctx.arc(projX, projY, 3, 0, Math.PI * 2);
-            ctx.fill();
+            // Draw dot at projected position (only if within radar range)
+            if (showDot) {
+                ctx.fillStyle = PHOSPHOR_GREEN;
+                ctx.beginPath();
+                ctx.arc(projX, projY, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
             ctx.restore();
         }
 
@@ -590,6 +602,52 @@ class RadarDisplay {
         ctx.restore();
     }
 
+    // Clip a line segment to the radar circle
+    // Returns the clipped endpoint if the line extends beyond the circle
+    clipLineToCircle(startX, startY, endX, endY) {
+        // Check if endpoint is outside radar
+        const endDist = Math.sqrt(endX * endX + endY * endY);
+        if (endDist <= this.radius) {
+            // Already inside, no clipping needed
+            return { x: endX, y: endY };
+        }
+
+        // Line direction
+        const dx = endX - startX;
+        const dy = endY - startY;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len === 0) return { x: endX, y: endY };
+
+        // Normalize direction
+        const ndx = dx / len;
+        const ndy = dy / len;
+
+        // Ray from start in direction (ndx, ndy)
+        // Circle equation: x^2 + y^2 = r^2
+        // Parametric ray: (startX + t*ndx, startY + t*ndy)
+        // Substitute into circle equation and solve for t
+
+        const a = ndx * ndx + ndy * ndy;  // Always 1 for normalized vector
+        const b = 2 * (startX * ndx + startY * ndy);
+        const c = startX * startX + startY * startY - this.radius * this.radius;
+
+        const discriminant = b * b - 4 * a * c;
+        if (discriminant < 0) {
+            // No intersection (shouldn't happen if endpoint is outside)
+            return { x: endX, y: endY };
+        }
+
+        // Two solutions; we want the farther one (positive t)
+        const t1 = (-b + Math.sqrt(discriminant)) / (2 * a);
+        const t2 = (-b - Math.sqrt(discriminant)) / (2 * a);
+        const t = Math.max(t1, t2);
+
+        return {
+            x: startX + t * ndx,
+            y: startY + t * ndy
+        };
+    }
+
     formatAircraftType(track) {
         if (track.manufacturer && track.model) {
             // Abbreviate common manufacturers
@@ -658,15 +716,27 @@ class RadarDisplay {
             if (runway.le_heading_degt !== null && runway.le_heading_degt !== undefined) {
                 const heading = runway.le_heading_degt;
                 const headingRad = heading * Math.PI / 180;
-                const extendX = Math.sin(headingRad) * approachDistPx;
-                const extendY = -Math.cos(headingRad) * approachDistPx;
+                let extendX = Math.sin(headingRad) * approachDistPx;
+                let extendY = -Math.cos(headingRad) * approachDistPx;
+
+                // Calculate endpoint
+                let endX = lePos.x - extendX;
+                let endY = lePos.y - extendY;
+
+                // Clip to radar edge along the line direction
+                const endDist = Math.sqrt(endX * endX + endY * endY);
+                if (endDist > this.radius) {
+                    const clipped = this.clipLineToCircle(lePos.x, lePos.y, endX, endY);
+                    endX = clipped.x;
+                    endY = clipped.y;
+                }
 
                 ctx.strokeStyle = 'rgba(0, 255, 0, 0.6)';  // Brighter for sunlight visibility
                 ctx.lineWidth = 1;
                 ctx.setLineDash([5, 5]);
                 ctx.beginPath();
                 ctx.moveTo(lePos.x, lePos.y);
-                ctx.lineTo(lePos.x - extendX, lePos.y - extendY);
+                ctx.lineTo(endX, endY);
                 ctx.stroke();
                 ctx.setLineDash([]);
             }
@@ -675,15 +745,27 @@ class RadarDisplay {
             if (runway.he_heading_degt !== null && runway.he_heading_degt !== undefined) {
                 const heading = runway.he_heading_degt;
                 const headingRad = heading * Math.PI / 180;
-                const extendX = Math.sin(headingRad) * approachDistPx;
-                const extendY = -Math.cos(headingRad) * approachDistPx;
+                let extendX = Math.sin(headingRad) * approachDistPx;
+                let extendY = -Math.cos(headingRad) * approachDistPx;
+
+                // Calculate endpoint
+                let endX = hePos.x - extendX;
+                let endY = hePos.y - extendY;
+
+                // Clip to radar edge along the line direction
+                const endDist = Math.sqrt(endX * endX + endY * endY);
+                if (endDist > this.radius) {
+                    const clipped = this.clipLineToCircle(hePos.x, hePos.y, endX, endY);
+                    endX = clipped.x;
+                    endY = clipped.y;
+                }
 
                 ctx.strokeStyle = 'rgba(0, 255, 0, 0.6)';  // Brighter for sunlight visibility
                 ctx.lineWidth = 1;
                 ctx.setLineDash([5, 5]);
                 ctx.beginPath();
                 ctx.moveTo(hePos.x, hePos.y);
-                ctx.lineTo(hePos.x - extendX, hePos.y - extendY);
+                ctx.lineTo(endX, endY);
                 ctx.stroke();
                 ctx.setLineDash([]);
             }
