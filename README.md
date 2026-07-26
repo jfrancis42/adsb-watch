@@ -23,6 +23,8 @@ N12ABC   A012BC N12ABC   CESSNA     172S       SMITH JOHN R     PARKED   KAPA  -
 - A demodulator on the SDR host:
   - `readsb` (recommended — modern wiedehopf fork)
   - `dump1090-fa`, `dump1090-mutability`, or `dump1090`
+- **Optional, for 978 MHz UAT (`--uat`):** a *second* RTL-SDR tuned to 978 and
+  `dump978-fa` (FlightAware). See [978 MHz UAT](#978-mhz-uat-traffic) below.
 - Network access to a govt-data instance for FAA registry, airport,
   runway, frequency, and navaid data. Defaults to `https://data.n0gq.org`,
   which requires HTTP Basic auth — see [Credentials](#credentials) below.
@@ -76,6 +78,56 @@ The auto-launcher tries `readsb`, `dump1090-fa`, `dump1090-mutability`,
 `dump1090` in that order. If port 30003 is already serving (e.g. systemd unit),
 it leaves it alone and just connects.
 
+### 978 MHz UAT traffic
+
+978 MHz UAT (Universal Access Transceiver) is the second US ADS-B datalink,
+used mostly by low-altitude general aviation. It's **off by default** — turn it
+on with `--uat`. Because one RTL-SDR can't cover both 1090 and 978 at once, this
+needs a **second dongle** tuned to 978 and the `dump978-fa` decoder on the SDR
+host.
+
+```bash
+# Both bands, auto-launching readsb (1090) and dump978-fa (978):
+python3 main.py --uat --fixed-lat 39.54 --fixed-lon -104.76 --fixed-alt-ft 5400
+```
+
+**Which dongle is which?** With two dongles plugged in, each decoder must be
+pointed at the right one. adsb-watch auto-detects by a serial-number
+convention: a dongle whose USB serial contains `978` is used for UAT, one
+containing `1090` for ADS-B. Label your dongles once and it just works:
+
+```bash
+rtl_eeprom -d 0 -s 1090     # (replug required to take effect)
+rtl_eeprom -d 1 -s 978
+```
+
+Or override explicitly (no relabeling needed) — list devices with `rtl_test`:
+
+```bash
+python3 main.py --uat \
+  --adsb-device 0 \
+  --uat-device 'driver=rtlsdr,rtl=1'
+```
+
+`--adsb-device` takes an index or serial (readsb/dump1090 `--device`);
+`--uat-device` takes a SoapySDR device string (e.g. `driver=rtlsdr,serial=00000978`).
+
+Already running dump978 under systemd? Point at it and skip the auto-launch:
+
+```bash
+python3 main.py --uat --uat-host 10.1.0.10 --uat-json-port 30979 --no-launch-dump978
+```
+
+Only aircraft *traffic* is ingested — dump978's JSON port emits no FIS-B
+weather, so nothing extra to filter. UAT aircraft share the ICAO Mode S address
+space with 1090, so a dual-link aircraft appears as a single merged track.
+
+Installing `dump978-fa`: it's a FlightAware tool. On most systems build from
+[FlightAware/dump978](https://github.com/flightaware/dump978)
+(`make dump978-fa`; deps: boost, libusb, rtl-sdr, SoapySDR + the rtlsdr Soapy
+module). On Arch, build from source rather than the AUR package (its boost
+compat patch is stale).
+
 ### Web radar UI
 
 ```bash
@@ -94,6 +146,38 @@ The web UI displays a circular radar scope with:
 - Aircraft labels showing altitude (ft), speed (mph), and type
 
 WebSocket server runs on port 8765, HTTP server on 8080 (override with `--web-port` / `--http-port`).
+
+#### KML/KMZ overlay
+
+The web radar can overlay a KML or KMZ file — polygon boundaries, lines, and
+point labels — drawn in **amber** so it reads as a distinct layer beneath the
+green aircraft, trails, and airports. It's **off by default**; enable it with
+`--kml`:
+
+```bash
+python3 main.py --web --kml \
+  --fixed-lat 39.54 --fixed-lon -104.76 --fixed-alt-ft 5400
+```
+
+`--kml-file PATH` picks the file to overlay (default:
+`COPA_v7_01-12-2026.kmz`, the Colorado Pilots Association practice areas):
+
+```bash
+python3 main.py --web --kml --kml-file /path/to/your-airspace.kmz ...
+```
+
+`kml.py` reads a `.kml` directly or `doc.kml` inside a `.kmz`, flattening every
+placemark to its polygons / lines / points plus each element's name. The overlay
+is static, so the server sends it once when a browser connects rather than on
+every frame. This flag only affects the web UI — the curses UI ignores it.
+
+**Getting the COPA practice-areas file:** the default `COPA_v7_01-12-2026.kmz`
+is the Colorado Pilots Association's practice-area map, downloadable from the
+[COPA practice areas page](https://coloradopilots.org/content.aspx?page_id=22&club_id=612720&module_id=540533).
+It is **not** bundled in this repository — download it into the project directory
+(or point `--kml-file` at wherever you saved it). The version/date in the
+filename changes as COPA revises the boundaries; pass the current filename to
+`--kml-file`.
 
 ### Keys (curses UI)
 
@@ -189,6 +273,13 @@ Most everything is overridable via flag or `$ENV`:
 | `--avr`               | —                  | use raw 30002 instead   |
 | `--no-launch-dump1090`| —                  | auto-launch on          |
 | `--dump1090-binary`   | —                  | first found on PATH     |
+| `--adsb-device`       | —                  | auto-detect (serial `1090`) |
+| `--uat`               | —                  | 978 MHz UAT off         |
+| `--uat-host`          | `UAT_HOST`         | `127.0.0.1`             |
+| `--uat-json-port`     | `UAT_JSON_PORT`    | `30979`                 |
+| `--no-launch-dump978` | —                  | auto-launch on (with `--uat`) |
+| `--uat-device`        | —                  | auto-detect (serial `978`) |
+| `--uat-gain`          | —                  | auto-gain               |
 | `--gpsd-host`         | `GPSD_HOST`        | `127.0.0.1`             |
 | `--gpsd-port`         | `GPSD_PORT`        | `2947`                  |
 | `--fixed-lat/-lon/-alt-ft` | —             | skip gpsd, pin observer |
@@ -199,6 +290,8 @@ Most everything is overridable via flag or `$ENV`:
 | `--cpa-nm`            | `CPA_HIGHLIGHT_NM` | `1.0`                   |
 | `--expiry`            | `ADSB_EXPIRY`      | `10.0` seconds          |
 | `--refresh-hz`        | `REFRESH_HZ`       | `4`                     |
+| `--kml`               | —                  | web KML overlay off     |
+| `--kml-file`          | —                  | `COPA_v7_01-12-2026.kmz` |
 
 ## Diagnostic
 
@@ -220,11 +313,16 @@ status (`fetching`, `loaded cache (N airports) @ <bucket>`, `fresh`, etc).
 | `geo.py`        | pure haversine / bearing / elevation / closest-approach math    |
 | `phase.py`      | pure-functional flight-phase classifier                         |
 | `feed_adsb.py`  | SBS-1 (30003) and AVR (30002) feeder threads                    |
+| `feed_uat.py`   | 978 MHz UAT traffic feeder (dump978-fa JSON port; `--uat`)      |
 | `feed_gps.py`   | gpsd JSON feeder thread                                         |
 | `registry.py`   | govt-data `/aircraft/hex/{hex}` lookup thread                   |
 | `airports.py`   | govt-data airport / runway / navaid client thread + dataclasses |
 | `cache.py`      | atomic JSON disk cache with TTL eviction                        |
 | `launcher.py`   | spawn/reap dump1090/readsb child process                        |
+| `launcher_uat.py`| spawn/reap dump978-fa child process (978 MHz)                   |
+| `sdr_detect.py` | enumerate RTL-SDRs; pick one per band by serial token           |
+| `kml.py`        | parse a KML/KMZ overlay (polygons/lines/labels) for the web UI (`--kml`) |
+| `ui_web.py`     | WebSocket + static-file server for the web radar UI             |
 | `ui_curses.py`  | curses front-end (the *only* file that touches curses)          |
 | `main.py`       | argparse + thread wiring                                        |
 | `probe.py`      | port probe for dump1090 troubleshooting                         |

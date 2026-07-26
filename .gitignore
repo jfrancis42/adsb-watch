@@ -8,3 +8,13 @@ venv/
 # Local cache files written by adsb-watch at runtime
 registry.json
 facilities.json
+
+# Session recordings (timestamped wire logs for replay)
+adsb-watch-*.jsonl
+*.jsonl
+logs/
+
+# KML/KMZ overlays are downloaded by the user, not bundled (see README --kml).
+# e.g. the COPA practice-areas file COPA_v7_*.kmz
+*.kmz
+*.kml
