@@ -8,6 +8,11 @@ const GRID_COLOR = '#00aa00';  // Brighter for visibility in sunlight
 const TEXT_COLOR = '#00ff00';
 const HIGHLIGHT_COLOR = '#00ff00';
 const TRAIL_COLOR = '#006600';
+// KML overlay drawn in amber so practice-area boundaries/labels read as a
+// distinct layer from the green aircraft, trails, and airports.
+const OVERLAY_COLOR = '#ffb000';
+const OVERLAY_FILL = 'rgba(255, 176, 0, 0.06)';
+const OVERLAY_LINE = 'rgba(255, 176, 0, 0.8)';
 
 class RadarDisplay {
     constructor(canvasId, wsUrl) {
@@ -21,10 +26,14 @@ class RadarDisplay {
         this.tracks = [];
         this.history = {};
         this.facilities = null;
+        this.overlay = null;  // Static KML overlay (polygons/lines/points), sent once on connect
         this.rangeNM = 5.0;
         this.trailSeconds = 30.0;
         this.projectionSeconds = 60.0;
         this.alertRangeNM = 1.0;
+
+        // Altitude display mode: 'asl' or 'agl'
+        this.altitudeMode = 'asl';
 
         // Sound effect settings
         this.soundApproaching = true;
@@ -60,6 +69,10 @@ class RadarDisplay {
 
         document.getElementById('alert-range-select').addEventListener('change', (e) => {
             this.alertRangeNM = parseFloat(e.target.value);
+        });
+
+        document.getElementById('altitude-mode-select').addEventListener('change', (e) => {
+            this.altitudeMode = e.target.value;
         });
 
         document.getElementById('sound-approaching').addEventListener('change', (e) => {
@@ -119,6 +132,8 @@ class RadarDisplay {
             const data = JSON.parse(event.data);
             if (data.type === 'snapshot') {
                 this.handleSnapshot(data);
+            } else if (data.type === 'overlay') {
+                this.overlay = data.overlay;
             }
         };
     }
@@ -222,26 +237,30 @@ class RadarDisplay {
 
         // Update indicator lights
         const adsbLight = document.getElementById('adsb-light');
+        const uatLight = document.getElementById('uat-light');
         const gpsLight = document.getElementById('gps-light');
 
-        // ADS-B light: on if we have an adsb-sbs feeder that's connected
-        if (data.feeders && data.feeders['adsb-sbs']) {
-            const adsbStatus = data.feeders['adsb-sbs'].toLowerCase();
-            if (adsbStatus.includes('connected') || adsbStatus.includes('msgs')) {
-                adsbLight.classList.add('on');
-            } else {
-                adsbLight.classList.remove('on');
-            }
-        } else {
-            adsbLight.classList.remove('on');
-        }
+        // A feeder counts as "on" when connected / passing messages.
+        const feederOn = (name) => {
+            if (!data.feeders || !data.feeders[name]) return false;
+            const s = data.feeders[name].toLowerCase();
+            return s.includes('connected') || s.includes('msgs');
+        };
+        const setLight = (light, on) => {
+            if (!light) return;
+            light.classList.toggle('on', on);
+        };
 
-        // GPS light: on if observer position is set
-        if (this.observer && this.observer.lat !== null && this.observer.lon !== null) {
-            gpsLight.classList.add('on');
-        } else {
-            gpsLight.classList.remove('on');
-        }
+        // 1090 light: SBS-1 or AVR feeder connected.
+        setLight(adsbLight, feederOn('adsb-sbs') || feederOn('adsb-avr'));
+
+        // 978 light: UAT feeder connected. Off when --uat wasn't enabled
+        // (no uat-978 feeder is ever reported).
+        setLight(uatLight, feederOn('uat-978'));
+
+        // GPS light: on if observer position is set.
+        setLight(gpsLight,
+            this.observer && this.observer.lat !== null && this.observer.lon !== null);
     }
 
     checkSoundTriggers() {
@@ -319,6 +338,11 @@ class RadarDisplay {
         this.ctx.translate(this.cx, this.cy);
 
         if (this.observer) {
+            // Draw KML overlay first (bottom-most layer, under airports)
+            if (this.overlay) {
+                this.drawOverlay(this.overlay);
+            }
+
             // Draw airports and runways first (bottom layer)
             if (this.facilities && this.facilities.airports) {
                 for (const airport of this.facilities.airports) {
@@ -573,7 +597,14 @@ class RadarDisplay {
         ctx.save();
         ctx.translate(pos.x, pos.y);
 
-        const alt = track.alt_ft !== null ? Math.round(track.alt_ft) : '---';
+        let alt = '---';
+        if (track.alt_ft !== null) {
+            if (this.altitudeMode === 'agl' && this.observer && this.observer.alt_ft !== null) {
+                alt = Math.round(track.alt_ft - this.observer.alt_ft);
+            } else {
+                alt = Math.round(track.alt_ft);
+            }
+        }
         const speed = track.speed_kt !== null ? Math.round(track.speed_kt * 1.15078) : '---'; // kt to mph
         const type = this.formatAircraftType(track);
 
@@ -678,6 +709,67 @@ class RadarDisplay {
         }
 
         return 'UNKNOWN';
+    }
+
+    drawOverlay(overlay) {
+        const ctx = this.ctx;
+        ctx.save();
+
+        // Clip everything to the radar circle so boundaries/labels don't spill
+        // past the scope edge.
+        ctx.beginPath();
+        ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+        ctx.clip();
+
+        // Polygons — outlined + faintly filled.
+        for (const poly of overlay.polygons || []) {
+            if (!poly.coords || poly.coords.length < 2) continue;
+            ctx.beginPath();
+            let first = true;
+            for (const [lat, lon] of poly.coords) {
+                const pos = this.latLonToXY(lat, lon);
+                if (!pos) continue;
+                if (first) { ctx.moveTo(pos.x, pos.y); first = false; }
+                else ctx.lineTo(pos.x, pos.y);
+            }
+            ctx.closePath();
+            ctx.fillStyle = OVERLAY_FILL;
+            ctx.fill();
+            ctx.strokeStyle = OVERLAY_LINE;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+
+        // Lines.
+        for (const line of overlay.lines || []) {
+            if (!line.coords || line.coords.length < 2) continue;
+            ctx.beginPath();
+            let first = true;
+            for (const [lat, lon] of line.coords) {
+                const pos = this.latLonToXY(lat, lon);
+                if (!pos) continue;
+                if (first) { ctx.moveTo(pos.x, pos.y); first = false; }
+                else ctx.lineTo(pos.x, pos.y);
+            }
+            ctx.strokeStyle = OVERLAY_LINE;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+
+        // Point labels — only those within the scope.
+        ctx.fillStyle = OVERLAY_COLOR;
+        ctx.font = '10px "Courier New"';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        for (const pt of overlay.points || []) {
+            const pos = this.latLonToXY(pt.lat, pt.lon);
+            if (!pos) continue;
+            const dist = Math.sqrt(pos.x * pos.x + pos.y * pos.y);
+            if (dist > this.radius) continue;
+            if (pt.name) ctx.fillText(pt.name, pos.x, pos.y);
+        }
+
+        ctx.restore();
     }
 
     drawAirport(airport) {

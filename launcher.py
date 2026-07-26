@@ -57,11 +57,16 @@ class Dump1090Launcher:
 
     def __init__(self, host: str, port: int, *,
                  binary: str | None = None,
+                 device: str | None = None,
                  extra_args: list[str] | None = None,
                  wait_seconds: float = 8.0):
         self.host = host
         self.port = port
         self.binary = binary
+        # RTL-SDR selector (index or serial) for --device. Needed when more
+        # than one dongle is present so we don't grab the 978 one. None lets
+        # the decoder pick the sole/default dongle.
+        self.device = device
         self.extra_args = extra_args or []
         self.wait_seconds = wait_seconds
         self.proc: subprocess.Popen | None = None
@@ -95,7 +100,11 @@ class Dump1090Launcher:
                 return
             path, args = found
 
-        cmd = [path] + args + self.extra_args
+        # Pin the dongle when a selector was given. readsb and the dump1090
+        # forks all accept `--device <index|serial>` (rtlsdr is their default
+        # device type, and readsb's args already set it explicitly).
+        dev_args = ['--device', self.device] if self.device else []
+        cmd = [path] + args + dev_args + self.extra_args
         self.command = cmd
         try:
             self.proc = subprocess.Popen(

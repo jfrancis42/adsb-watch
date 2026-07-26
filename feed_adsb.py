@@ -37,11 +37,12 @@ class SbsFeeder(threading.Thread):
     daemon = True
     name_id = 'adsb-sbs'
 
-    def __init__(self, engine: Engine, host: str, port: int):
+    def __init__(self, engine: Engine, host: str, port: int, recorder=None):
         super().__init__(name=self.name_id)
         self.engine = engine
         self.host = host
         self.port = port
+        self.recorder = recorder
         self._stop = threading.Event()
 
     def stop(self):
@@ -75,7 +76,10 @@ class SbsFeeder(threading.Thread):
                 buf += chunk
                 while b'\n' in buf:
                     line, buf = buf.split(b'\n', 1)
-                    self._handle(line.decode('ascii', 'ignore').strip())
+                    text = line.decode('ascii', 'ignore').strip()
+                    if self.recorder is not None and text:
+                        self.recorder.log(self.name_id, text)
+                    self._handle(text)
 
     def _handle(self, line: str):
         if not line.startswith('MSG,'):
@@ -122,11 +126,12 @@ class AvrFeeder(threading.Thread):
     daemon = True
     name_id = 'adsb-avr'
 
-    def __init__(self, engine: Engine, host: str, port: int):
+    def __init__(self, engine: Engine, host: str, port: int, recorder=None):
         super().__init__(name=self.name_id)
         self.engine = engine
         self.host = host
         self.port = port
+        self.recorder = recorder
         self._stop = threading.Event()
         self._cpr: dict[str, dict] = {}
 
@@ -163,7 +168,11 @@ class AvrFeeder(threading.Thread):
                 buf += chunk
                 while b'\n' in buf:
                     line, buf = buf.split(b'\n', 1)
-                    self._handle_line(line.strip())
+                    line = line.strip()
+                    if self.recorder is not None and line:
+                        self.recorder.log(self.name_id,
+                                          line.decode('ascii', 'ignore'))
+                    self._handle_line(line)
 
     def _handle_line(self, line: bytes):
         if not line:

@@ -20,10 +20,15 @@ except ImportError:
 class RadarServer:
     """WebSocket server that broadcasts engine snapshots to all connected clients."""
 
-    def __init__(self, engine, refresh_hz: float = 4.0, port: int = 8765):
+    def __init__(self, engine, refresh_hz: float = 4.0, port: int = 8765,
+                 overlay: Optional[dict] = None):
         self.engine = engine
         self.refresh_hz = refresh_hz
         self.port = port
+        # Static KML/KMZ overlay (polygons/lines/points), or None. Sent once
+        # per client on connect — it never changes, so it stays out of the
+        # per-frame snapshot broadcast.
+        self.overlay = overlay
         self.clients = set()
         # Track position history: {icao: [(timestamp, lat, lon, alt_ft, course_deg, speed_kt), ...]}
         self.history = {}
@@ -31,12 +36,17 @@ class RadarServer:
         # Track when each aircraft was last seen (to know when to purge history)
         self.aircraft_last_seen = {}
         self.history_retention_s = 900.0  # Keep history for 15 minutes after aircraft disappears
+        self.trail_seconds = 300.0  # Trim each aircraft's trail to the last 5 minutes
 
     async def handler(self, websocket):
         """Handle a single WebSocket connection."""
         self.clients.add(websocket)
         print(f"Client connected: {websocket.remote_address}")
         try:
+            # Send the static overlay once (it never changes after load).
+            if self.overlay is not None:
+                await websocket.send(json.dumps({'type': 'overlay',
+                                                 'overlay': self.overlay}))
             # Send initial snapshot immediately
             await self.send_snapshot(websocket)
             # Keep connection alive and handle any incoming messages
@@ -77,6 +87,10 @@ class RadarServer:
                 # Only add if position changed or it's been >1s since last point
                 if not trail or (trail[-1][1] != track.lat or trail[-1][2] != track.lon) or (now - trail[-1][0] > 1.0):
                     trail.append((now, track.lat, track.lon, track.alt_ft, track.course_deg, track.speed_kt))
+                # Trim to the trailing window so trails don't grow without bound.
+                cutoff = now - self.trail_seconds
+                while trail and trail[0][0] < cutoff:
+                    trail.pop(0)
 
     async def send_snapshot(self, websocket):
         """Send current state to a single client."""
@@ -233,9 +247,10 @@ class RadarServer:
             await self.broadcast_loop()
 
 
-def run(engine, refresh_hz: float = 4.0, port: int = 8765, http_port: int = 8080):
+def run(engine, refresh_hz: float = 4.0, port: int = 8765, http_port: int = 8080,
+        overlay: Optional[dict] = None):
     """Entry point for web UI. Starts WebSocket server and HTTP server for static files."""
-    server = RadarServer(engine, refresh_hz, port)
+    server = RadarServer(engine, refresh_hz, port, overlay=overlay)
 
     # Start HTTP server for static files in a background thread
     import http.server

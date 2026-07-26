@@ -196,6 +196,13 @@
                     </select>
                 </span>
                 <span>
+                    Altitude:
+                    <select id="altitude-mode-select">
+                        <option value="asl" selected>ASL</option>
+                        <option value="agl">AGL</option>
+                    </select>
+                </span>
+                <span>
                     Alert Range:
                     <select id="alert-range-select">
                         <option value="0">None</option>
@@ -208,7 +215,11 @@
                 </span>
                 <span class="indicator">
                     <span class="indicator-light" id="adsb-light"></span>
-                    <span>ADS-B</span>
+                    <span>1090</span>
+                </span>
+                <span class="indicator">
+                    <span class="indicator-light" id="uat-light"></span>
+                    <span>978</span>
                 </span>
                 <span class="indicator">
                     <span class="indicator-light" id="gps-light"></span>

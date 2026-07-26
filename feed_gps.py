@@ -12,11 +12,14 @@ from engine import Engine
 class GpsFeeder(threading.Thread):
     daemon = True
 
-    def __init__(self, engine: Engine, host: str, port: int):
+    name_id = 'gps'
+
+    def __init__(self, engine: Engine, host: str, port: int, recorder=None):
         super().__init__(name='gps-feeder')
         self.engine = engine
         self.host = host
         self.port = port
+        self.recorder = recorder
         self._stop = threading.Event()
 
     def stop(self):
@@ -44,6 +47,10 @@ class GpsFeeder(threading.Thread):
                 buf += chunk
                 while b'\n' in buf:
                     line, buf = buf.split(b'\n', 1)
+                    if self.recorder is not None:
+                        text = line.decode('utf-8', 'ignore').strip()
+                        if text:
+                            self.recorder.log(self.name_id, text)
                     self._handle(line)
 
     def _handle(self, line: bytes):
