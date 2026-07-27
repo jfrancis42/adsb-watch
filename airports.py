@@ -27,6 +27,57 @@ from cache import RegistryCache
 GRID_DEG = 0.25  # ~15 NM at mid-latitudes — coarse on purpose
 
 
+class AirportLookupError(Exception):
+    """Raised by resolve_airport() when the code can't be resolved."""
+
+
+def resolve_airport(base_url: str, user: str, password: str, ident: str,
+                    timeout: float = 15.0) -> tuple[float, float, float]:
+    """Resolve an airport code to (lat, lon, elevation_ft) via govt-data.
+
+    `ident` may be an ICAO ('KAWO'), IATA, GPS/FAA local ('S43'), or
+    OurAirports ident — govt-data's GET /airports/{ident} matches any of them.
+
+    Returns (lat, lon, elev_ft); elevation defaults to 0.0 if the record has
+    none. Raises AirportLookupError on 404 (unknown code), missing
+    coordinates, auth failure, or any network/parse error — the caller turns
+    that into a clean argparse error so a typo'd code fails fast at startup.
+    """
+    code = ident.strip().upper()
+    if not code:
+        raise AirportLookupError('empty airport code')
+    url = f'{base_url.rstrip("/")}/airports/{urllib.parse.quote(code)}'
+    headers = {}
+    if user or password:
+        token = base64.b64encode(f'{user}:{password}'.encode()).decode()
+        headers['Authorization'] = f'Basic {token}'
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise AirportLookupError(f'airport {code!r} not found in govt-data')
+        if e.code in (401, 403):
+            raise AirportLookupError(
+                f'not authorized to query govt-data ({e.code}); set '
+                f'GOVT_DATA_USER / GOVT_DATA_PASS')
+        raise AirportLookupError(f'govt-data HTTP {e.code} looking up {code!r}')
+    except Exception as e:
+        raise AirportLookupError(
+            f'could not reach govt-data at {base_url}: {type(e).__name__}: {e}')
+
+    lat = data.get('latitude_deg')
+    lon = data.get('longitude_deg')
+    if lat is None or lon is None:
+        raise AirportLookupError(f'airport {code!r} has no coordinates in govt-data')
+    elev = data.get('elevation_ft')
+    name = data.get('name') or code
+    resolve_airport.last_name = name  # let the caller print a friendly name
+    resolve_airport.last_ident = data.get('ident') or code
+    return float(lat), float(lon), float(elev) if elev is not None else 0.0
+
+
 def bucket_key(lat: float, lon: float) -> str:
     """Quantize (lat, lon) to a coarse grid so nearby observer positions reuse
     the same cache row. Returned as a string so it can be a dict key."""

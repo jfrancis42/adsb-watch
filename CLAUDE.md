@@ -47,6 +47,7 @@ Threading model:
 | `phase.py`      | pure-functional `classify()` — flight-phase + airport + runway    |
 | `feed_adsb.py`  | `SbsFeeder` (30003 CSV) + `AvrFeeder` (30002 raw hex)             |
 | `feed_uat.py`   | `UatFeeder` — 978 MHz UAT traffic from dump978-fa JSON port (opt-in) |
+| `feed_internet.py`| `InternetFeeder` — public aggregators (adsb.lol/airplanes.live/OpenSky), opt-in `--internet` |
 | `feed_gps.py`   | TPV reader from gpsd JSON                                         |
 | `registry.py`   | polls `Engine.pending_registry_lookups()`, calls govt-data        |
 | `airports.py`   | `FacilitiesClient` thread + `Airport`/`Runway`/`Navaid`/`Facilities` |
@@ -159,6 +160,9 @@ Tunables are constants at the top of `phase.py`. Closed runways are skipped.
 
 Endpoints used:
 - `GET /aircraft/hex/{icao_hex}` — FAA registry by Mode S hex
+- `GET /airports/{ident}` — single airport lookup by ICAO/IATA/GPS/FAA-local
+  code. `airports.resolve_airport()` uses this for `--airport` (center the
+  scope on a named airport); returns `latitude_deg`/`longitude_deg`/`elevation_ft`.
 - `GET /airports/near?lat&lon&radius_nm&limit` — airports in radius
 - `GET /airports/{ident}/runways` — runway endpoints + true headings
 - `GET /airports/{ident}/frequencies` — freqs in kHz (mostly cached, not yet
@@ -256,6 +260,37 @@ sudo cp dump978-fa /usr/local/bin/
 
 On 10.1.0.10 (mother) this is already installed at `/usr/local/bin/dump978-fa`.
 
+## Internet ADS-B (feed_internet.py, --internet)
+
+Pulls live traffic from public aggregators when there's no local receiver, or to
+fill gaps in local coverage. **Off by default.** Ported from vestigare
+(`server/feeds/`) — the REST endpoints, poll cadences, and OpenSky SI-unit
+conversion come from there — but re-implemented as **stdlib-urllib daemon
+threads** (not vestigare's asyncio/httpx) to match this repo's feeder style and
+add no dependency. `InternetFeeder` polls one source, normalises to a canonical
+dict, and calls `engine.update_aircraft(..., source='internet')`.
+
+Two invariants make this work without touching the prediction path:
+
+- **The 5 Hz dead-reckoning lives in `Engine._track_for()`, not in any feeder.**
+  It runs on any aircraft that has course+speed, regardless of source. So
+  internet tracks (which carry `track`/`gs`/`baro_rate`) get the same smoothing
+  as local ones for free — the ~1 Hz network cadence is invisible on-screen.
+- **Local-vs-internet priority is resolved in `Engine.update_aircraft()`, the
+  single merge point.** Each aircraft records `last_local_pos`. While that's
+  fresher than `local_priority_s`, internet *kinematic* updates (lat/lon + alt/
+  course/speed/vrate) for that ICAO are dropped — local RTL-SDR wins. Callsign
+  always merges (identity, not position). `local_priority_s` is clamped to
+  `expiry_s - 1` in `__init__` so a plane leaving local range is handed to
+  internet data *before* it would expire (no blink). `Track.source` carries
+  `'local'`/`'internet'` out to UIs.
+
+Sources: `adsb_lol`, `airplanes_live` (both the tar1090 point endpoint, 1 s),
+`opensky` (bbox, 10 s anon / 5 s with `$OPENSKY_USERNAME`+`$OPENSKY_PASSWORD`).
+airplanes.live 403s the default urllib User-Agent — `_get_json` sends an
+explicit UA. Feeders read the observer position fresh each poll, so a moving
+gpsd receiver re-centres the query.
+
 ## Adding a new front-end
 
 1. Write `ui_yours.py` with a `run(engine, refresh_hz)` entry point.
@@ -302,3 +337,51 @@ Association practice areas). Curses UI ignores it.
   `{'type':'overlay', ...}` message on connect, kept out of the 5 Hz snapshot
   broadcast. `radar.js` caches it in `this.overlay` and draws it in `render()`,
   clipped to the scope circle.
+
+### WebSocket URL selection (radar.js)
+
+`radar.js` picks the WS URL by page scheme:
+- **HTTP** (`http://host:8086/radar.html`, direct/local): `ws://host:8765` —
+  the WS server is a separate port on the same host.
+- **HTTPS** (`https://adsb.n0gq.org/`, behind the TLS proxy): `wss://host/ws` —
+  same-origin, so no mixed-content block; nginx proxies `/ws` → `:8765`. A
+  plaintext `ws://…:8765` from an HTTPS page would be blocked and :8765 isn't
+  public anyway.
+
+## Production deployment (adsb.n0gq.org)
+
+Runs as a systemd service on **10.1.0.20** (dmz), fronted by TLS at
+`https://adsb.n0gq.org`. There is no SDR on 10.1.0.20 — traffic comes from the
+`--internet` feeds. It mirrors the interactive command used on 10.1.0.10 (the
+SDR host), minus the local receiver:
+
+```
+main.py --web --web-port 8765 --http-port 8086 --no-launch-dump1090 --kml \
+        --fixed-lat 39.3553696 --fixed-lon -104.6729929 --fixed-alt-ft 6750 \
+        --govt-data-url http://10.1.0.20:8091 --internet
+```
+
+- **systemd unit**: `adsb-watch.service` (in-repo, installed to
+  `/etc/systemd/system/`). Reads `GOVT_DATA_USER`/`GOVT_DATA_PASS` (and optional
+  `OPENSKY_*`) from `/etc/adsb-watch.env`.
+- **Code path on 10.1.0.20**: `/home/jfrancis/adsb-watch` (rsynced from
+  `~/Dropbox/build/adsb-watch`; the gitignored KMZ is copied separately so
+  `--kml` has a file).
+- **TLS/DNS**: `adsb.n0gq.org` A records → us (5.78.187.228) + eu
+  (172.232.139.96). nginx on both proxies terminates TLS (wildcard `*.n0gq.org`
+  cert) and forwards over WireGuard to `10.1.0.20:8086` (static) and
+  `10.1.0.20:8765` (`/ws`). Bare `/` 302-redirects to `/radar.html`.
+- **Deploy**: `cd ansible && ansible-playbook -i inventory.ini provision.yml`
+  (tags: `dns`, `deploy`, `nginx`). See `ansible/provision.yml`.
+- **Restart**: `ssh 10.1.0.20 "sudo systemctl restart adsb-watch"`.
+
+Two skynet gotchas the playbook handles:
+- The n0gq.org vhosts listen on `127.0.0.1:444 ssl proxy_protocol` (NOT `:443`)
+  — the nginx **stream module** owns 443 and demuxes by SNI. Copying the
+  (stale) `listen 443` pattern from an old vhost breaks routing.
+- `nginx -t` must run with `OPENSSL_CONF=/etc/ssl/openssl-oqs.cnf`, or it
+  rejects the post-quantum `ssl_conf_command Groups X25519MLKEM768:…` that
+  every n0gq.org vhost sets (the systemd unit sets this env; a bare `nginx -t`
+  does not).
+- The `:444` listen means redirects need `absolute_redirect off` so `Location`
+  doesn't leak `:444` to the browser.

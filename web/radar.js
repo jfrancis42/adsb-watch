@@ -920,8 +920,21 @@ class RadarDisplay {
 
 // Initialize when page loads
 window.addEventListener('DOMContentLoaded', () => {
-    // Determine WebSocket URL (same host, port 8765)
-    const wsUrl = `ws://${window.location.hostname}:8765`;
+    // Determine WebSocket URL.
+    //
+    // Direct/local access (http://host:8086/radar.html): the WS server is a
+    // separate port on the same host, so connect to ws://host:8765.
+    //
+    // Behind a TLS reverse proxy (https://adsb.n0gq.org/): the page is HTTPS,
+    // so a plaintext ws:// to :8765 would be blocked as mixed content and the
+    // raw WS port isn't exposed publicly anyway. Use a same-origin wss:// URL
+    // and let nginx proxy the /ws path back to the server's :8765.
+    let wsUrl;
+    if (window.location.protocol === 'https:') {
+        wsUrl = `wss://${window.location.host}/ws`;
+    } else {
+        wsUrl = `ws://${window.location.hostname}:8765`;
+    }
     const radar = new RadarDisplay('radar', wsUrl);
 
     // Make radar globally accessible for debugging

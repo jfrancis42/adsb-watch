@@ -72,7 +72,15 @@ python3 main.py --dump1090-host other-box.local --no-launch-dump1090
 
 # No GPS handy? Pin the observer:
 python3 main.py --fixed-lat 39.54 --fixed-lon -104.76 --fixed-alt-ft 5400
+
+# …or center the scope on an airport by code (ICAO / IATA / GPS / FAA local):
+python3 main.py --airport KDEN      # Denver International
+python3 main.py --airport S43       # Harvey Field
 ```
+
+`--airport` resolves the code to lat / lon / field elevation via govt-data and
+pins the observer there. It takes precedence over `--fixed-lat/-lon` and gpsd,
+and fails fast with a clear message if the code is unknown.
 
 The auto-launcher tries `readsb`, `dump1090-fa`, `dump1090-mutability`,
 `dump1090` in that order. If port 30003 is already serving (e.g. systemd unit),
@@ -128,6 +136,49 @@ Installing `dump978-fa`: it's a FlightAware tool. On most systems build from
 module). On Arch, build from source rather than the AUR package (its boost
 compat patch is stale).
 
+### Internet ADS-B (no receiver required)
+
+adsb-watch can pull live traffic from public internet aggregators instead of
+(or alongside) a local RTL-SDR. It's **off by default** — enable with
+`--internet`:
+
+```bash
+# Internet-only — no SDR needed. Pin an observer so there's a scope centre.
+python3 main.py --no-launch-dump1090 --internet \
+  --fixed-lat 39.54 --fixed-lon -104.76 --fixed-alt-ft 5400
+
+# Local receiver PLUS internet fill-in (local data wins per-aircraft):
+python3 main.py --internet
+```
+
+Sources (repeat `--internet-source` to pick a subset; default is
+`adsb_lol` + `airplanes_live`):
+
+| source           | endpoint                | poll   | notes |
+|------------------|-------------------------|--------|-------|
+| `adsb_lol`       | api.adsb.lol/v2         | 1 s    | readsb/tar1090 backend |
+| `airplanes_live` | api.airplanes.live/v2   | 1 s    | same format as adsb.lol |
+| `opensky`        | opensky-network.org     | 10 s (anon) / 5 s (auth) | bounding-box; set `OPENSKY_USERNAME`/`OPENSKY_PASSWORD` for the better rate |
+
+```bash
+python3 main.py --internet --internet-source opensky --internet-radius-nm 80
+```
+
+**Local data takes priority.** When both a local RTL-SDR and an internet source
+report the same aircraft (matched by ICAO hex), the local position wins — the
+internet copy is ignored while the local fix is fresh. If the aircraft drops off
+the local receiver (out of antenna range, terrain shadow), internet data
+seamlessly takes over after `--local-priority-s` seconds (default 5, auto-clamped
+below `--expiry` so the track never blinks out during the handover). Aircraft the
+local receiver never hears are shown from internet data alone.
+
+Internet updates arrive at ~1 Hz (slower for OpenSky), but the same **5 Hz
+dead-reckoning** used for local traffic applies to internet tracks too — each
+aircraft's position is projected forward from its last report using its course,
+speed, and vertical rate, so the display stays smooth between network updates.
+An observer position is required (from gpsd or `--fixed-lat/--fixed-lon`) since
+the aggregators are queried by a point + radius.
+
 ### Web radar UI
 
 ```bash
@@ -178,6 +229,26 @@ It is **not** bundled in this repository — download it into the project direct
 (or point `--kml-file` at wherever you saved it). The version/date in the
 filename changes as COPA revises the boundaries; pass the current filename to
 `--kml-file`.
+
+### Hosted instance
+
+A public instance runs at **https://adsb.n0gq.org** (internet-fed, centered on
+the Colorado front range, COPA practice-area overlay on). It's deployed to
+`10.1.0.20` as the `adsb-watch` systemd service and fronted by the n0gq.org
+nginx TLS proxies. To (re)deploy or stand up your own:
+
+```bash
+cd ansible
+ansible-playbook -i inventory.ini provision.yml
+#   --tags dns      DNS A records only
+#   --tags deploy   the 10.1.0.20 service only
+#   --tags nginx    the us/eu proxy vhosts only
+```
+
+The playbook installs the service, its Python venv, `/etc/adsb-watch.env`
+(govt-data creds), the DNS records, and the TLS reverse-proxy vhosts. See
+`CLAUDE.md` → "Production deployment" for the architecture and the skynet
+proxy conventions it follows.
 
 ### Keys (curses UI)
 
@@ -283,6 +354,7 @@ Most everything is overridable via flag or `$ENV`:
 | `--gpsd-host`         | `GPSD_HOST`        | `127.0.0.1`             |
 | `--gpsd-port`         | `GPSD_PORT`        | `2947`                  |
 | `--fixed-lat/-lon/-alt-ft` | —             | skip gpsd, pin observer |
+| `--airport`           | —                  | center on airport code (ICAO/IATA/GPS/local) |
 | `--govt-data-url`     | `GOVT_DATA_URL`    | `https://data.n0gq.org` |
 | `--cache-path`        | `ADSB_CACHE_PATH`  | `$XDG_CACHE_HOME/adsb-watch/registry.json` |
 | `--cache-ttl-days`    | `ADSB_CACHE_TTL_S` | 7 days                  |
@@ -292,6 +364,11 @@ Most everything is overridable via flag or `$ENV`:
 | `--refresh-hz`        | `REFRESH_HZ`       | `4`                     |
 | `--kml`               | —                  | web KML overlay off     |
 | `--kml-file`          | —                  | `COPA_v7_01-12-2026.kmz` |
+| `--internet`          | —                  | internet ADS-B off      |
+| `--internet-source`   | —                  | `adsb_lol` + `airplanes_live` |
+| `--internet-radius-nm`| —                  | `50`                    |
+| `--local-priority-s`  | —                  | `5` (clamped < `--expiry`) |
+| `--internet` (OpenSky)| `OPENSKY_USERNAME` / `OPENSKY_PASSWORD` | anonymous |
 
 ## Diagnostic
 
@@ -314,6 +391,7 @@ status (`fetching`, `loaded cache (N airports) @ <bucket>`, `fresh`, etc).
 | `phase.py`      | pure-functional flight-phase classifier                         |
 | `feed_adsb.py`  | SBS-1 (30003) and AVR (30002) feeder threads                    |
 | `feed_uat.py`   | 978 MHz UAT traffic feeder (dump978-fa JSON port; `--uat`)      |
+| `feed_internet.py`| internet ADS-B feeders (adsb.lol / airplanes.live / OpenSky; `--internet`) |
 | `feed_gps.py`   | gpsd JSON feeder thread                                         |
 | `registry.py`   | govt-data `/aircraft/hex/{hex}` lookup thread                   |
 | `airports.py`   | govt-data airport / runway / navaid client thread + dataclasses |
