@@ -281,6 +281,10 @@ def main():
         gps.start()
 
     # --- Internet ADS-B feeders (optional) -------------------------------
+    # In web mode, gate the feeders on whether any browser is connected so we
+    # pull one shared internet stream when someone's watching and none when
+    # nobody is. The curses UI has no such notion, so its feeders always poll.
+    viewer_gate = ui_web.ViewerGate() if args.web else None
     net_feeders = []
     if args.internet:
         sources = args.internet_source or ['adsb_lol', 'airplanes_live']
@@ -291,12 +295,15 @@ def main():
         for src in sources:
             f = InternetFeeder(engine, src, engine.get_observer_position,
                                radius_nm=args.internet_radius_nm,
-                               recorder=recorder)
+                               recorder=recorder,
+                               should_poll=(viewer_gate.active
+                                            if viewer_gate else None))
             f.start()
             net_feeders.append(f)
+        gated = ' (gated on web viewers)' if viewer_gate else ''
         print(f'Internet ADS-B enabled: {", ".join(sources)} '
               f'(radius {args.internet_radius_nm:g} NM, '
-              f'local priority {engine.local_priority_s:g}s)')
+              f'local priority {engine.local_priority_s:g}s){gated}')
 
     audio = None
     if args.audio_flag:
@@ -323,7 +330,8 @@ def main():
     try:
         if args.web:
             ui_web.run(engine, args.refresh_hz, port=args.web_port,
-                       http_port=args.http_port, overlay=overlay)
+                       http_port=args.http_port, overlay=overlay,
+                       viewer_gate=viewer_gate)
         else:
             ui_curses.run(engine, args.refresh_hz)
     finally:

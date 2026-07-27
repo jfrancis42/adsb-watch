@@ -17,14 +17,51 @@ except ImportError:
     raise
 
 
+class ViewerGate:
+    """Thread-safe view of whether any web client is currently connected.
+
+    The internet ADS-B feeders (a separate daemon thread each) poll ``active()``
+    to decide whether to hit the aggregators this cycle, so the public instance
+    fetches one shared stream when someone's watching and nothing when nobody
+    is. A short ``linger_s`` keeps the feed warm across a page refresh (the old
+    socket closes a beat before the new one connects) so viewers don't see a
+    cold gap.
+    """
+
+    def __init__(self, linger_s: float = 3.0):
+        self._count = 0
+        self._last_active = 0.0
+        self._linger_s = linger_s
+        self._lock = threading.Lock()
+
+    def add(self):
+        with self._lock:
+            self._count += 1
+            self._last_active = time.time()
+
+    def remove(self):
+        with self._lock:
+            self._count = max(0, self._count - 1)
+            self._last_active = time.time()
+
+    def active(self) -> bool:
+        with self._lock:
+            if self._count > 0:
+                return True
+            return (time.time() - self._last_active) < self._linger_s
+
+
 class RadarServer:
     """WebSocket server that broadcasts engine snapshots to all connected clients."""
 
     def __init__(self, engine, refresh_hz: float = 4.0, port: int = 8765,
-                 overlay: Optional[dict] = None):
+                 overlay: Optional[dict] = None, viewer_gate: Optional['ViewerGate'] = None):
         self.engine = engine
         self.refresh_hz = refresh_hz
         self.port = port
+        # Shared with the internet feeders so they only poll when a client is
+        # watching. None in local/curses use, where the feeders always poll.
+        self.viewer_gate = viewer_gate
         # Static KML/KMZ overlay (polygons/lines/points), or None. Sent once
         # per client on connect — it never changes, so it stays out of the
         # per-frame snapshot broadcast.
@@ -41,6 +78,8 @@ class RadarServer:
     async def handler(self, websocket):
         """Handle a single WebSocket connection."""
         self.clients.add(websocket)
+        if self.viewer_gate is not None:
+            self.viewer_gate.add()
         print(f"Client connected: {websocket.remote_address}")
         try:
             # Send the static overlay once (it never changes after load).
@@ -60,6 +99,8 @@ class RadarServer:
         finally:
             print(f"Client disconnected: {websocket.remote_address}")
             self.clients.discard(websocket)
+            if self.viewer_gate is not None:
+                self.viewer_gate.remove()
 
     def _prune_history(self, now: float):
         """Remove history for aircraft that haven't been seen in 15 minutes."""
@@ -250,9 +291,10 @@ class RadarServer:
 
 
 def run(engine, refresh_hz: float = 4.0, port: int = 8765, http_port: int = 8080,
-        overlay: Optional[dict] = None):
+        overlay: Optional[dict] = None, viewer_gate: Optional['ViewerGate'] = None):
     """Entry point for web UI. Starts WebSocket server and HTTP server for static files."""
-    server = RadarServer(engine, refresh_hz, port, overlay=overlay)
+    server = RadarServer(engine, refresh_hz, port, overlay=overlay,
+                         viewer_gate=viewer_gate)
 
     # Start HTTP server for static files in a background thread
     import http.server

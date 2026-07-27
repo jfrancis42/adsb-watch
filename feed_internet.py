@@ -209,7 +209,7 @@ class InternetFeeder(threading.Thread):
     daemon = True
 
     def __init__(self, engine: Engine, source: str, get_observer,
-                 radius_nm: float, recorder=None):
+                 radius_nm: float, recorder=None, should_poll=None):
         if source not in SOURCES:
             raise ValueError(f'unknown internet source {source!r}; '
                              f'choose from {", ".join(SOURCES)}')
@@ -221,6 +221,11 @@ class InternetFeeder(threading.Thread):
         self.get_observer = get_observer
         self.radius_nm = radius_nm
         self.recorder = recorder
+        # Optional zero-arg predicate: return False to skip polling this cycle
+        # (e.g. no web viewers connected). None => always poll. This is what
+        # makes the public instance demand-driven — one shared poll stream for
+        # all viewers, and none at all when nobody is watching.
+        self.should_poll = should_poll
         self._stop = threading.Event()
 
         # OpenSky: optional auth improves the rate limit (5 s vs 10 s anon).
@@ -259,6 +264,13 @@ class InternetFeeder(threading.Thread):
         backoff = self.interval
         cap = 120.0 if self.source == 'opensky' else 30.0
         while not self._stop.is_set():
+            if self.should_poll is not None and not self.should_poll():
+                # No consumers right now (e.g. no web clients) — stay idle and
+                # don't hit the aggregator. Re-check on the normal cadence.
+                self.engine.report_feeder(self.name_id,
+                                          f'{self.label}: idle (no viewers)')
+                self._stop.wait(self.interval)
+                continue
             pos = self.get_observer()
             if pos is None:
                 self.engine.report_feeder(self.name_id,
