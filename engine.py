@@ -36,6 +36,13 @@ class Aircraft:
     vrate_fpm: Optional[float] = None
     last_seen: float = 0.0
     last_pos: float = 0.0
+    # When we last got a *local* (RTL-SDR) position fix for this aircraft.
+    # Used to give local data priority over internet-streamed data: while this
+    # is fresh, internet position updates for the same ICAO are ignored. 0.0
+    # means "never heard locally" (e.g. a purely internet-sourced aircraft).
+    last_local_pos: float = 0.0
+    # Source of the currently-displayed position: 'local' or 'internet'.
+    pos_source: Optional[str] = None
     # Smoothed CPA — EMA over fresh predictions, kept on the Aircraft so
     # the displayed countdown doesn't jitter every time a new velocity report
     # arrives. Reset whenever the aircraft is no longer approaching.
@@ -80,6 +87,7 @@ class Track:
     age_s: float
     predicted: bool = False            # True when lat/lon/alt are dead-reckoned, not freshly reported
     predicted_age_s: float = 0.0       # how long the position has been dead-reckoned
+    source: Optional[str] = None       # position source: 'local' (RTL-SDR) or 'internet'
     phase: str = 'AIRBORNE'            # PARKED/TAXI/TAKEOFF/LANDING/APPROACH/DEPART/AIRBORNE
     airport: Optional[str] = None      # ICAO ident of the airport, if any
     runway:  Optional[str] = None      # e.g. "25L"
@@ -105,12 +113,17 @@ class Engine:
     """Thread-safe state holder. All public methods grab `_lock`."""
 
     def __init__(self, expiry_s: float = 10.0, cpa_threshold_nm: float = 1.0,
-                 registry_cache=None):
+                 registry_cache=None, local_priority_s: float = 5.0):
         self._lock = threading.RLock()
         self._aircraft: dict[str, Aircraft] = {}
         self._observer = Observer()
         self.expiry_s = expiry_s
         self.cpa_threshold_nm = cpa_threshold_nm
+        # How long a local (RTL-SDR) position fix suppresses internet position
+        # updates for the same ICAO. Kept strictly below expiry_s so a plane
+        # that leaves local range is handed over to internet data before it
+        # would expire — otherwise the track would blink out and reappear.
+        self.local_priority_s = min(local_priority_s, max(0.0, expiry_s - 1.0))
         self._feeders: dict[str, str] = {}
         self._counts:  dict[str, int] = {}
         # Optional persistent registry cache (cache.RegistryCache instance, or
@@ -156,7 +169,17 @@ class Engine:
 
     def update_aircraft(self, icao: str, *, callsign=None, lat=None, lon=None,
                         alt_ft=None, course_deg=None, speed_kt=None,
-                        vrate_fpm=None):
+                        vrate_fpm=None, source: str = 'local'):
+        """Merge an aircraft update.
+
+        `source` is 'local' (RTL-SDR: SBS/AVR/UAT feeders) or 'internet'
+        (public aggregators). Local data wins: while a local position fix is
+        fresher than `local_priority_s`, internet *kinematic* updates
+        (position + altitude/course/speed/vrate) for the same aircraft are
+        dropped so the two sources don't fight over the plotted position and
+        its velocity vector. Callsign always merges — it's identity, not
+        position, and internet feeds often carry it when local squitter hasn't.
+        """
         icao = icao.upper()
         now = time.time()
         with self._lock:
@@ -174,14 +197,31 @@ class Engine:
                             ac.model        = cached.get('model')
                             ac.owner        = cached.get('owner')
                         ac.registry_checked = True
-            if callsign is not None:   ac.callsign = callsign.strip() or ac.callsign
-            if alt_ft   is not None:   ac.alt_ft = alt_ft
-            if course_deg is not None: ac.course_deg = course_deg
-            if speed_kt   is not None: ac.speed_kt = speed_kt
-            if vrate_fpm  is not None: ac.vrate_fpm = vrate_fpm
-            if lat is not None and lon is not None:
-                ac.lat, ac.lon = lat, lon
-                ac.last_pos = now
+
+            # Callsign is identity — accept it from either source regardless of
+            # position priority.
+            if callsign is not None:
+                ac.callsign = callsign.strip() or ac.callsign
+
+            # Position priority: internet kinematic data is suppressed while a
+            # local fix is still fresh. Local data is never suppressed.
+            suppress_kinematics = (
+                source == 'internet'
+                and (now - ac.last_local_pos) <= self.local_priority_s
+            )
+
+            if not suppress_kinematics:
+                if alt_ft   is not None:   ac.alt_ft = alt_ft
+                if course_deg is not None: ac.course_deg = course_deg
+                if speed_kt   is not None: ac.speed_kt = speed_kt
+                if vrate_fpm  is not None: ac.vrate_fpm = vrate_fpm
+                if lat is not None and lon is not None:
+                    ac.lat, ac.lon = lat, lon
+                    ac.last_pos = now
+                    ac.pos_source = source
+                    if source == 'local':
+                        ac.last_local_pos = now
+
             ac.last_seen = now
             self._aircraft[icao] = ac
 
@@ -310,6 +350,7 @@ class Engine:
             closing=closing,
             predicted=is_predicted,
             predicted_age_s=predicted_age,
+            source=a.pos_source,
             phase=ph.phase, airport=ph.airport_ident,
             runway=ph.runway, phase_detail=ph.detail,
             age_s=now - a.last_seen,

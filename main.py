@@ -9,12 +9,13 @@ import argparse
 
 import config
 import os
-from airports import FacilitiesClient
+from airports import FacilitiesClient, resolve_airport, AirportLookupError
 from audio import AudioAlerter
 from cache import RegistryCache
 from engine import Engine
 from feed_adsb import SbsFeeder, AvrFeeder
 from feed_gps import GpsFeeder
+from feed_internet import InternetFeeder, SOURCES as INTERNET_SOURCES
 from feed_uat import UatFeeder
 import kml as kml_loader
 from launcher import Dump1090Launcher
@@ -66,6 +67,25 @@ def main():
                    help='RTL-SDR selector (index or serial) for the 1090 dongle, '
                         'passed to readsb/dump1090 --device. Default: auto-detect a '
                         'dongle whose serial contains "1090" when >1 dongle is present.')
+    # --- Internet ADS-B (public aggregators, default off) ----------------
+    p.add_argument('--internet', action='store_true',
+                   help='Also pull live ADS-B from public internet aggregators '
+                        '(adsb.lol, airplanes.live, OpenSky). Local RTL-SDR data '
+                        'takes priority per-aircraft; internet fills the gaps. '
+                        'Needs an observer position (gpsd or --fixed-lat/-lon). '
+                        'Default off.')
+    p.add_argument('--internet-source', action='append', metavar='SOURCE',
+                   help='Which internet source(s) to use (repeatable). Choose '
+                        'from: adsb_lol, airplanes_live, opensky. Default: '
+                        'adsb_lol + airplanes_live. OpenSky honours '
+                        '$OPENSKY_USERNAME/$OPENSKY_PASSWORD for a better rate.')
+    p.add_argument('--internet-radius-nm', type=float, default=50.0,
+                   help='Query radius (NM) around the observer for internet '
+                        'sources (default 50).')
+    p.add_argument('--local-priority-s', type=float, default=5.0,
+                   help='Seconds a local RTL-SDR fix suppresses internet data '
+                        'for the same aircraft (default 5; auto-clamped below '
+                        '--expiry). Only relevant with --internet.')
     p.add_argument('--gpsd-host',     default=config.GPSD_HOST)
     p.add_argument('--gpsd-port',     type=int, default=config.GPSD_PORT)
     p.add_argument('--govt-data-url', default=config.GOVT_DATA_URL)
@@ -76,6 +96,10 @@ def main():
                    help='Skip gpsd; pin the observer to this latitude.')
     p.add_argument('--fixed-lon',     type=float)
     p.add_argument('--fixed-alt-ft',  type=float, default=0.0)
+    p.add_argument('--airport', metavar='CODE',
+                   help='Center the radar on an airport instead of gpsd/--fixed-*. '
+                        'Accepts ICAO, IATA, GPS, or FAA local codes (e.g. KAWO, '
+                        'S43, DEN); resolved to lat/lon/elevation via govt-data.')
     p.add_argument('--cache-path',    default=config.REGISTRY_CACHE_PATH,
                    help='On-disk JSON cache for FAA registry lookups.')
     p.add_argument('--cache-ttl-days', type=float,
@@ -121,7 +145,7 @@ def main():
         facility_cache = RegistryCache(
             facility_cache_path, ttl_s=args.cache_ttl_days * 86400.0)
     engine = Engine(expiry_s=args.expiry, cpa_threshold_nm=args.cpa_nm,
-                    registry_cache=cache)
+                    registry_cache=cache, local_priority_s=args.local_priority_s)
 
     # Session logger — records every received wire line for later replay.
     recorder = None
@@ -237,13 +261,42 @@ def main():
         threading.Thread(target=bridge, daemon=True, name='fac-bridge').start()
         facilities.start()
 
-    if args.fixed_lat is not None and args.fixed_lon is not None:
+    if args.airport:
+        try:
+            lat, lon, elev_ft = resolve_airport(
+                args.govt_data_url, config.GOVT_DATA_USER,
+                config.GOVT_DATA_PASS, args.airport)
+        except AirportLookupError as e:
+            p.error(f'--airport {args.airport!r}: {e}')
+        engine.update_observer(lat, lon, elev_ft, manual=True)
+        print(f'Radar centered on {resolve_airport.last_ident} '
+              f'({resolve_airport.last_name}): '
+              f'{lat:.5f}, {lon:.5f}, {elev_ft:.0f} ft')
+    elif args.fixed_lat is not None and args.fixed_lon is not None:
         engine.update_observer(args.fixed_lat, args.fixed_lon,
                                args.fixed_alt_ft, manual=True)
     else:
         gps = GpsFeeder(engine, args.gpsd_host, args.gpsd_port,
                         recorder=recorder)
         gps.start()
+
+    # --- Internet ADS-B feeders (optional) -------------------------------
+    net_feeders = []
+    if args.internet:
+        sources = args.internet_source or ['adsb_lol', 'airplanes_live']
+        unknown = [s for s in sources if s not in INTERNET_SOURCES]
+        if unknown:
+            p.error(f'unknown --internet-source {unknown}; choose from '
+                    f'{", ".join(INTERNET_SOURCES)}')
+        for src in sources:
+            f = InternetFeeder(engine, src, engine.get_observer_position,
+                               radius_nm=args.internet_radius_nm,
+                               recorder=recorder)
+            f.start()
+            net_feeders.append(f)
+        print(f'Internet ADS-B enabled: {", ".join(sources)} '
+              f'(radius {args.internet_radius_nm:g} NM, '
+              f'local priority {engine.local_priority_s:g}s)')
 
     audio = None
     if args.audio_flag:
@@ -278,6 +331,8 @@ def main():
         reg.stop()
         if uat:
             uat.stop()
+        for f in net_feeders:
+            f.stop()
         if facilities:
             facilities.stop()
         if audio:

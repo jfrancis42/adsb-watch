@@ -1,0 +1,247 @@
+---
+# provision.yml — deploy adsb-watch as a systemd service on 10.1.0.20 and
+# publish it at https://adsb.n0gq.org via the us/eu nginx TLS proxies.
+#
+# Usage (idempotent, safe to re-run):
+#   cd ~/adsb-watch/ansible
+#   ansible-playbook -i inventory.ini provision.yml
+#
+# Subsets:
+#   ansible-playbook -i inventory.ini provision.yml --tags dns      # DNS only
+#   ansible-playbook -i inventory.ini provision.yml --tags deploy   # .20 only
+#   ansible-playbook -i inventory.ini provision.yml --tags nginx    # proxies only
+#
+# Credentials: GOVT_DATA_USER/GOVT_DATA_PASS are written to /etc/adsb-watch.env
+# on 10.1.0.20 from the vars below (override on the command line with -e).
+
+- name: DNS — create adsb.n0gq.org A records (us + eu)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    dnsimple_account: "136216"
+    dnsimple_zone: "n0gq.org"
+    dnsimple_token: "{{ lookup('file', '~/creds/dnsimple-dns.key') }}"
+    vpn_us_ip: "5.78.187.228"
+    vpn_eu_ip: "172.232.139.96"
+
+  tasks:
+    - name: Query existing adsb.n0gq.org A records
+      uri:
+        url: "https://api.dnsimple.com/v2/{{ dnsimple_account }}/zones/{{ dnsimple_zone }}/records?type=A&name=adsb"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ dnsimple_token }}"
+          Accept: "application/json"
+      register: adsb_dns
+      tags: [dns]
+
+    - name: Create adsb.n0gq.org A record → us ({{ vpn_us_ip }})
+      uri:
+        url: "https://api.dnsimple.com/v2/{{ dnsimple_account }}/zones/{{ dnsimple_zone }}/records"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ dnsimple_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          type: "A"
+          name: "adsb"
+          content: "{{ vpn_us_ip }}"
+          ttl: 3600
+        status_code: 201
+      when: >
+        (adsb_dns.json.data
+          | selectattr('content', 'equalto', vpn_us_ip)
+          | list | length) == 0
+      tags: [dns]
+
+    - name: Create adsb.n0gq.org A record → eu ({{ vpn_eu_ip }})
+      uri:
+        url: "https://api.dnsimple.com/v2/{{ dnsimple_account }}/zones/{{ dnsimple_zone }}/records"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ dnsimple_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          type: "A"
+          name: "adsb"
+          content: "{{ vpn_eu_ip }}"
+          ttl: 3600
+        status_code: 201
+      when: >
+        (adsb_dns.json.data
+          | selectattr('content', 'equalto', vpn_eu_ip)
+          | list | length) == 0
+      tags: [dns]
+
+
+- name: Deploy adsb-watch to 10.1.0.20
+  hosts: dmz
+  become: true
+  gather_facts: true
+
+  vars:
+    app_dir: /home/jfrancis/adsb-watch
+    # govt-data API credentials (HTTP Basic). NOT stored in this (public) repo:
+    # read at deploy time from the govt-data service's own auth.json on the
+    # control node. Override with -e govt_data_user=... -e govt_data_pass=...
+    # (e.g. for a different govt-data instance or if the secret rotates).
+    govt_data_user: "aprs"
+    govt_data_pass: >-
+      {{ (lookup('file', '~/Dropbox/build/govt-data/auth.json')
+          | from_json).users[govt_data_user] }}
+
+  tasks:
+    - name: Install Python3 venv and pip
+      apt:
+        name:
+          - python3
+          - python3-venv
+          - python3-pip
+        state: present
+      tags: [deploy]
+
+    - name: Sync adsb-watch source
+      ansible.posix.synchronize:
+        src: ~/Dropbox/build/adsb-watch/
+        dest: "{{ app_dir }}/"
+        delete: false
+        rsync_opts:
+          - "--exclude=ansible/"
+          - "--exclude=venv/"
+          - "--exclude=__pycache__/"
+          - "--exclude=.git/"
+          - "--exclude=*.kmz"
+          - "--exclude=*.kml"
+          - "--chown=jfrancis:jfrancis"
+      tags: [deploy]
+
+    # The KMZ overlay is gitignored and excluded from the sync above; copy it
+    # explicitly so --kml has a file to load. Skips cleanly if not present.
+    - name: Check for local COPA KMZ overlay
+      delegate_to: localhost
+      become: false
+      stat:
+        path: ~/Dropbox/build/adsb-watch/COPA_v7_01-12-2026.kmz
+      register: local_kmz
+      tags: [deploy]
+
+    - name: Copy COPA KMZ overlay
+      copy:
+        src: ~/Dropbox/build/adsb-watch/COPA_v7_01-12-2026.kmz
+        dest: "{{ app_dir }}/COPA_v7_01-12-2026.kmz"
+        owner: jfrancis
+        group: jfrancis
+        mode: '0644'
+      when: local_kmz.stat.exists
+      tags: [deploy]
+
+    - name: Create Python venv
+      become_user: jfrancis
+      command: python3 -m venv {{ app_dir }}/venv
+      args:
+        creates: "{{ app_dir }}/venv/bin/activate"
+      tags: [deploy]
+
+    - name: Install Python dependencies
+      become_user: jfrancis
+      pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        virtualenv: "{{ app_dir }}/venv"
+      tags: [deploy]
+
+    - name: Create environment file with govt-data credentials
+      copy:
+        dest: /etc/adsb-watch.env
+        content: |
+          GOVT_DATA_USER={{ govt_data_user }}
+          GOVT_DATA_PASS={{ govt_data_pass }}
+        owner: root
+        group: jfrancis
+        mode: '0640'
+      tags: [deploy]
+
+    - name: Install systemd service
+      copy:
+        src: "{{ app_dir }}/adsb-watch.service"
+        dest: /etc/systemd/system/adsb-watch.service
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload systemd
+      tags: [deploy]
+
+    - name: Enable and start adsb-watch service
+      systemd:
+        name: adsb-watch
+        enabled: true
+        state: restarted
+        daemon_reload: true
+      tags: [deploy]
+
+    # UFW is currently inactive on 10.1.0.20; this rule is a harmless no-op
+    # for parity, and correctly scopes access to the VPN if UFW is enabled.
+    - name: Allow web ports through UFW from the VPN
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+        src: 10.1.0.0/23
+      loop:
+        - "8086"
+        - "8765"
+      tags: [deploy]
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: true
+
+
+- name: Publish adsb.n0gq.org via us + eu nginx proxies
+  hosts: proxies
+  become: true
+  gather_facts: false
+
+  vars:
+    vhost_file: /etc/nginx/sites-available/adsb.n0gq.org
+    vhost_link: /etc/nginx/sites-enabled/adsb.n0gq.org
+
+  tasks:
+    - name: Deploy adsb.n0gq.org nginx vhost
+      copy:
+        src: adsb-nginx.conf
+        dest: "{{ vhost_file }}"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload nginx
+      tags: [nginx]
+
+    - name: Enable adsb.n0gq.org nginx vhost
+      file:
+        src: "{{ vhost_file }}"
+        dest: "{{ vhost_link }}"
+        state: link
+      notify: Reload nginx
+      tags: [nginx]
+
+    - name: Validate nginx configuration
+      # nginx runs with OPENSSL_CONF pointing at the oqs-provider config (see
+      # skynet configure.yml's systemd drop-in) so the post-quantum group in
+      # ssl_conf_command is recognised. `nginx -t` must use the same env or it
+      # rejects the X25519MLKEM768 group that every n0gq.org vhost sets.
+      command: nginx -t
+      environment:
+        OPENSSL_CONF: /etc/ssl/openssl-oqs.cnf
+      changed_when: false
+      tags: [nginx]
+
+  handlers:
+    - name: Reload nginx
+      service:
+        name: nginx
+        state: reloaded
