@@ -194,7 +194,7 @@ See [[govt-data-api]] for the full endpoint list.
   on boot. If you want adsb-watch to launch its own copy, stop+disable it.
 - On Arch, `dump1090-fa-git` (AUR) installs its binary as `/usr/bin/dump1090`.
   Confusing but harmless.
-- 10.1.0.10 is the SDR host; 10.1.0.20 hosts govt-data. Both reachable on
+- 10.1.0.10 is the SDR host; 10.1.17.20 hosts govt-data. Both reachable on
   the LAN. Run with `--dump1090-host 10.1.0.10 --no-launch-dump1090` to use
   the existing receiver there.
 
@@ -350,30 +350,30 @@ Association practice areas). Curses UI ignores it.
 
 ## Production deployment (adsb.n0gq.org)
 
-Runs as a systemd service on **10.1.0.20** (dmz), fronted by TLS at
-`https://adsb.n0gq.org`. There is no SDR on 10.1.0.20 — traffic comes from the
+Runs as a systemd service on **10.1.17.20** (dmz), fronted by TLS at
+`https://adsb.n0gq.org`. There is no SDR on 10.1.17.20 — traffic comes from the
 `--internet` feeds. It mirrors the interactive command used on 10.1.0.10 (the
 SDR host), minus the local receiver:
 
 ```
 main.py --web --web-port 8765 --http-port 8086 --no-launch-dump1090 --kml \
         --fixed-lat 39.3553696 --fixed-lon -104.6729929 --fixed-alt-ft 6750 \
-        --govt-data-url http://10.1.0.20:8091 --internet
+        --govt-data-url http://10.1.17.20:8091 --internet
 ```
 
 - **systemd unit**: `adsb-watch.service` (in-repo, installed to
   `/etc/systemd/system/`). Reads `GOVT_DATA_USER`/`GOVT_DATA_PASS` (and optional
   `OPENSKY_*`) from `/etc/adsb-watch.env`.
-- **Code path on 10.1.0.20**: `/home/jfrancis/adsb-watch` (rsynced from
+- **Code path on 10.1.17.20**: `/home/jfrancis/adsb-watch` (rsynced from
   `~/Dropbox/build/adsb-watch`; the gitignored KMZ is copied separately so
   `--kml` has a file).
 - **TLS/DNS**: `adsb.n0gq.org` A records → us (5.78.187.228) + eu
   (172.232.139.96). nginx on both proxies terminates TLS (wildcard `*.n0gq.org`
-  cert) and forwards over WireGuard to `10.1.0.20:8086` (static) and
-  `10.1.0.20:8765` (`/ws`). Bare `/` 302-redirects to `/radar.html`.
+  cert) and forwards over WireGuard to `10.1.17.20:8086` (static) and
+  `10.1.17.20:8765` (`/ws`). Bare `/` 302-redirects to `/radar.html`.
 - **Deploy**: `cd ansible && ansible-playbook -i inventory.ini provision.yml`
   (tags: `dns`, `deploy`, `nginx`). See `ansible/provision.yml`.
-- **Restart**: `ssh 10.1.0.20 "sudo systemctl restart adsb-watch"`.
+- **Restart**: `ssh 10.1.17.20 "sudo systemctl restart adsb-watch"`.
 
 Two skynet gotchas the playbook handles:
 - The n0gq.org vhosts listen on `127.0.0.1:444 ssl proxy_protocol` (NOT `:443`)

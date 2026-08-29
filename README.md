@@ -234,14 +234,14 @@ filename changes as COPA revises the boundaries; pass the current filename to
 
 A public instance runs at **https://adsb.n0gq.org** (internet-fed, centered on
 the Colorado front range, COPA practice-area overlay on). It's deployed to
-`10.1.0.20` as the `adsb-watch` systemd service and fronted by the n0gq.org
+`10.1.17.20` as the `adsb-watch` systemd service and fronted by the n0gq.org
 nginx TLS proxies. To (re)deploy or stand up your own:
 
 ```bash
 cd ansible
 ansible-playbook -i inventory.ini provision.yml
 #   --tags dns      DNS A records only
-#   --tags deploy   the 10.1.0.20 service only
+#   --tags deploy   the 10.1.17.20 service only
 #   --tags nginx    the us/eu proxy vhosts only
 ```
 
