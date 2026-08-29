@@ -1,89 +1,27 @@
 ---
-# provision.yml — deploy adsb-watch as a systemd service on 10.1.0.20 and
-# publish it at https://adsb.n0gq.org via the us/eu nginx TLS proxies.
+# provision.yml — build the adsb-watch server from scratch.
 #
-# Usage (idempotent, safe to re-run):
-#   cd ~/adsb-watch/ansible
 #   ansible-playbook -i inventory.ini provision.yml
 #
-# Subsets:
-#   ansible-playbook -i inventory.ini provision.yml --tags dns      # DNS only
-#   ansible-playbook -i inventory.ini provision.yml --tags deploy   # .20 only
-#   ansible-playbook -i inventory.ini provision.yml --tags nginx    # proxies only
+# Idempotent; safe to re-run.  Builds the SERVER only.
 #
-# Credentials: GOVT_DATA_USER/GOVT_DATA_PASS are written to /etc/adsb-watch.env
-# on 10.1.0.20 from the vars below (override on the command line with -e).
-
-- name: DNS — create adsb.n0gq.org A records (us + eu)
-  hosts: localhost
-  gather_facts: false
-
-  vars:
-    dnsimple_account: "136216"
-    dnsimple_zone: "n0gq.org"
-    dnsimple_token: "{{ lookup('file', '~/creds/dnsimple-dns.key') }}"
-    vpn_us_ip: "5.78.187.228"
-    vpn_eu_ip: "172.232.139.96"
-
-  tasks:
-    - name: Query existing adsb.n0gq.org A records
-      uri:
-        url: "https://api.dnsimple.com/v2/{{ dnsimple_account }}/zones/{{ dnsimple_zone }}/records?type=A&name=adsb"
-        method: GET
-        headers:
-          Authorization: "Bearer {{ dnsimple_token }}"
-          Accept: "application/json"
-      register: adsb_dns
-      tags: [dns]
-
-    - name: Create adsb.n0gq.org A record → us ({{ vpn_us_ip }})
-      uri:
-        url: "https://api.dnsimple.com/v2/{{ dnsimple_account }}/zones/{{ dnsimple_zone }}/records"
-        method: POST
-        headers:
-          Authorization: "Bearer {{ dnsimple_token }}"
-          Content-Type: "application/json"
-        body_format: json
-        body:
-          type: "A"
-          name: "adsb"
-          content: "{{ vpn_us_ip }}"
-          ttl: 3600
-        status_code: 201
-      when: >
-        (adsb_dns.json.data
-          | selectattr('content', 'equalto', vpn_us_ip)
-          | list | length) == 0
-      tags: [dns]
-
-    - name: Create adsb.n0gq.org A record → eu ({{ vpn_eu_ip }})
-      uri:
-        url: "https://api.dnsimple.com/v2/{{ dnsimple_account }}/zones/{{ dnsimple_zone }}/records"
-        method: POST
-        headers:
-          Authorization: "Bearer {{ dnsimple_token }}"
-          Content-Type: "application/json"
-        body_format: json
-        body:
-          type: "A"
-          name: "adsb"
-          content: "{{ vpn_eu_ip }}"
-          ttl: 3600
-        status_code: 201
-      when: >
-        (adsb_dns.json.data
-          | selectattr('content', 'equalto', vpn_eu_ip)
-          | list | length) == 0
-      tags: [dns]
-
-
-- name: Deploy adsb-watch to 10.1.0.20
-  hosts: dmz
+# NOT done here, because skynet owns them and two writers of one resource is
+# how they silently diverge (both used to live here, hardcoded to dmz):
+#   * public DNS for adsb.n0gq.org -> skynet/ansible/dns-public-services.yml
+#   * the us/eu nginx vhost        -> skynet/ansible/configure.yml, tag
+#                                     nginx_adsb, template adsb-nginx.j2
+- name: Build the adsb-watch server
+  hosts: adsb
   become: true
   gather_facts: true
 
   vars:
     app_dir: /home/jfrancis/adsb-watch
+    http_port: 8086
+    ws_port: 8765
+    # govt-data is itself being moved off dmz (skynet/dmz-modernize.md).  It is
+    # a variable so this playbook does not need editing when it lands.
+    govt_data_url: "http://10.1.17.42:8091"
     # govt-data API credentials (HTTP Basic). NOT stored in this (public) repo:
     # read at deploy time from the govt-data service's own auth.json on the
     # control node. Override with -e govt_data_user=... -e govt_data_pass=...
@@ -96,6 +34,12 @@
   tasks:
     - name: Install Python3 venv and pip
       apt:
+        # update_cache is not optional here.  The `generic` base image ships
+        # with /var/lib/apt/lists emptied, so on a freshly cloned VM every
+        # package name fails to resolve -- "No package matching 'python3-venv'
+        # is available" on a machine where it plainly is available.
+        update_cache: true
+        cache_valid_time: 3600
         name:
           - python3
           - python3-venv
@@ -113,8 +57,6 @@
           - "--exclude=venv/"
           - "--exclude=__pycache__/"
           - "--exclude=.git/"
-          - "--exclude=*.kmz"
-          - "--exclude=*.kml"
           - "--chown=jfrancis:jfrancis"
       tags: [deploy]
 
@@ -153,6 +95,7 @@
       tags: [deploy]
 
     - name: Create environment file with govt-data credentials
+      notify: Restart adsb-watch
       copy:
         dest: /etc/adsb-watch.env
         content: |
@@ -165,24 +108,56 @@
 
     - name: Install systemd service
       copy:
-        src: "{{ app_dir }}/adsb-watch.service"
         dest: /etc/systemd/system/adsb-watch.service
-        remote_src: true
         owner: root
         group: root
         mode: '0644'
-      notify: Reload systemd
+        content: |
+          # ANSIBLE MANAGED (adsb-watch/ansible/provision.yml)
+          [Unit]
+          Description=ADS-B Watch (web radar, internet feeds)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=jfrancis
+          WorkingDirectory={{ app_dir }}
+          EnvironmentFile=/etc/adsb-watch.env
+          Environment=PYTHONUNBUFFERED=1
+          # This VM has no RTL-SDR, so traffic comes from --internet.
+          # Web UI on :{{ http_port }} (HTTP) and :{{ ws_port }} (WebSocket);
+          # the hub vhost fronts both -- see skynet configure.yml, tag
+          # nginx_adsb.  radar.js picks ws://host:{{ ws_port }} over plain http
+          # and wss://host/ws over TLS, so BOTH ports matter.
+          ExecStart={{ app_dir }}/venv/bin/python3 {{ app_dir }}/main.py \
+              --web --web-port {{ ws_port }} --http-port {{ http_port }} \
+              --no-launch-dump1090 \
+              --kml \
+              --fixed-lat 39.3553696 --fixed-lon -104.6729929 --fixed-alt-ft 6750 \
+              --govt-data-url {{ govt_data_url }} \
+              --internet
+          Restart=always
+          RestartSec=5
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart adsb-watch
       tags: [deploy]
 
+    # started, not restarted: `restarted` bounces the service on every run for
+    # no reason and keeps the play permanently reporting changed.
     - name: Enable and start adsb-watch service
       systemd:
         name: adsb-watch
         enabled: true
-        state: restarted
+        state: started
         daemon_reload: true
       tags: [deploy]
 
-    # UFW is currently inactive on 10.1.0.20; this rule is a harmless no-op
+    # UFW is currently inactive on 10.1.17.20; this rule is a harmless no-op
     # for parity, and correctly scopes access to the VPN if UFW is enabled.
     - name: Allow web ports through UFW from the VPN
       ufw:
@@ -196,52 +171,14 @@
       tags: [deploy]
 
   handlers:
+    - name: Restart adsb-watch
+      systemd:
+        name: adsb-watch
+        state: restarted
+        daemon_reload: true
+
     - name: Reload systemd
       systemd:
         daemon_reload: true
 
 
-- name: Publish adsb.n0gq.org via us + eu nginx proxies
-  hosts: proxies
-  become: true
-  gather_facts: false
-
-  vars:
-    vhost_file: /etc/nginx/sites-available/adsb.n0gq.org
-    vhost_link: /etc/nginx/sites-enabled/adsb.n0gq.org
-
-  tasks:
-    - name: Deploy adsb.n0gq.org nginx vhost
-      copy:
-        src: adsb-nginx.conf
-        dest: "{{ vhost_file }}"
-        owner: root
-        group: root
-        mode: '0644'
-      notify: Reload nginx
-      tags: [nginx]
-
-    - name: Enable adsb.n0gq.org nginx vhost
-      file:
-        src: "{{ vhost_file }}"
-        dest: "{{ vhost_link }}"
-        state: link
-      notify: Reload nginx
-      tags: [nginx]
-
-    - name: Validate nginx configuration
-      # nginx runs with OPENSSL_CONF pointing at the oqs-provider config (see
-      # skynet configure.yml's systemd drop-in) so the post-quantum group in
-      # ssl_conf_command is recognised. `nginx -t` must use the same env or it
-      # rejects the X25519MLKEM768 group that every n0gq.org vhost sets.
-      command: nginx -t
-      environment:
-        OPENSSL_CONF: /etc/ssl/openssl-oqs.cnf
-      changed_when: false
-      tags: [nginx]
-
-  handlers:
-    - name: Reload nginx
-      service:
-        name: nginx
-        state: reloaded

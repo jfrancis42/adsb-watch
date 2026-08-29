@@ -62,7 +62,7 @@ over-the-air with **no internet**.)
    georeferenced bitmap mosaic — drop it as a raster layer under the aircraft.
    RF-sourced weather radar behind your own traffic display.
 
-2. **Publish weather to the MQTT bus** (`10.1.0.20:1883`). METARs / TAFs /
+2. **Publish weather to the MQTT bus** (`10.1.17.20:1883`). METARs / TAFs /
    PIREPs / winds-aloft are compact text products — decode and publish as
    retained topics (`wx/metar/<station>`, etc.). Any app subscribes. Fits the
    rf-bench pub/sub pattern exactly.

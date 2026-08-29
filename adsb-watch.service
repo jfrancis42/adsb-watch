@@ -11,14 +11,14 @@ WorkingDirectory=/home/jfrancis/adsb-watch
 EnvironmentFile=/etc/adsb-watch.env
 Environment=PYTHONUNBUFFERED=1
 # Same parameters as the interactive run on 10.1.0.10, minus the local SDR:
-# 10.1.0.20 has no RTL-SDR, so --no-launch-dump1090 and traffic comes from
+# 10.1.17.20 has no RTL-SDR, so --no-launch-dump1090 and traffic comes from
 # --internet. Web UI on :8086 (HTTP) + :8765 (WS); nginx on us/eu fronts both.
 ExecStart=/home/jfrancis/adsb-watch/venv/bin/python3 /home/jfrancis/adsb-watch/main.py \
     --web --web-port 8765 --http-port 8086 \
     --no-launch-dump1090 \
     --kml \
     --fixed-lat 39.3553696 --fixed-lon -104.6729929 --fixed-alt-ft 6750 \
-    --govt-data-url http://10.1.0.20:8091 \
+    --govt-data-url http://10.1.17.20:8091 \
     --internet
 Restart=always
 RestartSec=5
