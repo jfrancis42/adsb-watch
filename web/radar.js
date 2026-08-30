@@ -25,6 +25,7 @@ class RadarDisplay {
         this.observer = null;
         this.tracks = [];
         this.history = {};
+        this.trailSeconds = 300.0;  // overwritten by the server's full frame
         this.facilities = null;
         this.overlay = null;  // Static KML overlay (polygons/lines/points), sent once on connect
         this.rangeNM = 5.0;
@@ -220,8 +221,43 @@ class RadarDisplay {
     handleSnapshot(data) {
         this.observer = data.observer;
         this.tracks = data.tracks;
-        this.history = data.history;
-        this.facilities = data.facilities;
+
+        // The server sends ONE full frame per connection and deltas after it.
+        // Before this, every frame carried the complete history (591 KiB) and
+        // facilities (62 KiB) three times a second -- 16.6 Mbit/s per viewer.
+        if (data.full) {
+            this.history = data.history || {};
+            if (data.trail_seconds) this.trailSeconds = data.trail_seconds;
+        } else {
+            // Merge appended points.  Dedup by timestamp: a client that
+            // connected mid-stream already holds points the first delta may
+            // repeat, because the server's watermark predates its connect.
+            if (data.history_delta) {
+                for (const [icao, pts] of Object.entries(data.history_delta)) {
+                    const trail = this.history[icao] || (this.history[icao] = []);
+                    const lastTs = trail.length ? trail[trail.length - 1][0] : -Infinity;
+                    for (const pt of pts) if (pt[0] > lastTs) trail.push(pt);
+                }
+            }
+            // Aircraft the server has aged out; without this the trail is
+            // kept forever, which a full snapshot used to prevent implicitly.
+            if (data.history_purge) {
+                for (const icao of data.history_purge) delete this.history[icao];
+            }
+            // Trim locally to the same window the server uses, or trails grow
+            // without bound now that nothing replaces them wholesale.
+            if (this.trailSeconds) {
+                const cutoff = (Date.now() / 1000) - this.trailSeconds;
+                for (const icao of Object.keys(this.history)) {
+                    const trail = this.history[icao];
+                    let i = 0;
+                    while (i < trail.length && trail[i][0] < cutoff) i++;
+                    if (i) trail.splice(0, i);
+                }
+            }
+        }
+        // Absent on a delta frame -- keep what we have; only replace when sent.
+        if (data.facilities !== undefined) this.facilities = data.facilities;
 
         // Check for sound trigger events
         this.checkSoundTriggers();
