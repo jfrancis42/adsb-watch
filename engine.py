@@ -113,7 +113,8 @@ class Engine:
     """Thread-safe state holder. All public methods grab `_lock`."""
 
     def __init__(self, expiry_s: float = 10.0, cpa_threshold_nm: float = 1.0,
-                 registry_cache=None, local_priority_s: float = 5.0):
+                 registry_cache=None, local_priority_s: float = 5.0,
+                 predict_stale_s: float | None = None):
         self._lock = threading.RLock()
         self._aircraft: dict[str, Aircraft] = {}
         self._observer = Observer()
@@ -124,6 +125,8 @@ class Engine:
         # that leaves local range is handed over to internet data before it
         # would expire — otherwise the track would blink out and reappear.
         self.local_priority_s = min(local_priority_s, max(0.0, expiry_s - 1.0))
+        self.predict_stale_s = (self.PREDICT_STALE_THRESHOLD_S
+                                if predict_stale_s is None else predict_stale_s)
         self._feeders: dict[str, str] = {}
         self._counts:  dict[str, int] = {}
         # Optional persistent registry cache (cache.RegistryCache instance, or
@@ -296,6 +299,14 @@ class Engine:
     # Aircraft positions older than this (in seconds) are considered "stale"
     # — we still display them by dead-reckoning forward, but the UI marks
     # them as predicted rather than real.
+    #
+    # 3 s suits RF, where positions arrive about once a second and three
+    # seconds of silence is genuinely unusual.  It is far too tight for a
+    # polled aggregator: adsb.lol is rate-limited to roughly one request a
+    # second and this instance polls every 2 s, so a 3 s threshold marked
+    # ~70% of the fleet predicted at all times and the display was
+    # permanently dim.  Instance-overridable via --predict-stale so the RF
+    # default is untouched.
     PREDICT_STALE_THRESHOLD_S = 3.0
 
     def _track_for(self, a: Aircraft, obs: Observer, now: float) -> Track:
@@ -313,7 +324,7 @@ class Engine:
             dr_lat = dr_lon = dr_alt = None
 
         predicted_age = elapsed
-        is_predicted = elapsed >= self.PREDICT_STALE_THRESHOLD_S
+        is_predicted = elapsed >= self.predict_stale_s
 
         dist = az = el = None
         cpa_d = cpa_t = cpa_az = None

@@ -77,8 +77,14 @@ def main():
     p.add_argument('--internet-source', action='append', metavar='SOURCE',
                    help='Which internet source(s) to use (repeatable). Choose '
                         'from: adsb_lol, airplanes_live, opensky. Default: '
-                        'adsb_lol + airplanes_live. OpenSky honours '
+                        'adsb_lol (airplanes_live disabled 2026-08-29: the '
+                        'service returns 403 to everyone). OpenSky honours '
                         '$OPENSKY_USERNAME/$OPENSKY_PASSWORD for a better rate.')
+    p.add_argument('--predict-stale', type=float, default=None, metavar='SECONDS',
+                   help='Mark a position as predicted (dead-reckoned) once it is '
+                        'this old. Default 3 s, which suits RF. Raise it for a '
+                        'polled internet feed whose poll interval approaches it, '
+                        'or nearly every aircraft reads as predicted.')
     p.add_argument('--internet-radius-nm', type=float, default=50.0,
                    help='Query radius (NM) around the observer for internet '
                         'sources (default 50).')
@@ -145,7 +151,8 @@ def main():
         facility_cache = RegistryCache(
             facility_cache_path, ttl_s=args.cache_ttl_days * 86400.0)
     engine = Engine(expiry_s=args.expiry, cpa_threshold_nm=args.cpa_nm,
-                    registry_cache=cache, local_priority_s=args.local_priority_s)
+                    registry_cache=cache, local_priority_s=args.local_priority_s,
+                    predict_stale_s=args.predict_stale)
 
     # Session logger — records every received wire line for later replay.
     recorder = None
@@ -287,7 +294,20 @@ def main():
     viewer_gate = ui_web.ViewerGate() if args.web else None
     net_feeders = []
     if args.internet:
-        sources = args.internet_source or ['adsb_lol', 'airplanes_live']
+        # airplanes_live is DISABLED BY DEFAULT, not removed.
+        #
+        # Since 2026-08-29 api.airplanes.live answers 403 to everything,
+        # including /ping.  Verified from three unrelated public IPs -- the
+        # office Starlink, Hetzner Oregon and Linode Stockholm -- so this is
+        # the service refusing everyone or now requiring auth, NOT this site
+        # being rate-limited or blacklisted.  Nothing here can fix it.
+        #
+        # Leaving it enabled costs a failing request every couple of minutes
+        # and puts a permanent red error in the feeder status, which buries
+        # real problems.  The driver code is untouched: re-enable with
+        #     --internet-source adsb_lol --internet-source airplanes_live
+        # and if the service comes back, restore it to this default list.
+        sources = args.internet_source or ['adsb_lol']
         unknown = [s for s in sources if s not in INTERNET_SOURCES]
         if unknown:
             p.error(f'unknown --internet-source {unknown}; choose from '

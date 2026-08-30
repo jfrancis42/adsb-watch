@@ -188,9 +188,14 @@ def canonical_to_kwargs(ac: dict):
 # Source registry
 # --------------------------------------------------------------------------
 # name -> (label, base_poll_interval_s, needs_opensky_auth)
+# Poll intervals.  adsb.lol and airplanes.live share a ~1 req/s limit, and
+# polling AT the limit means tripping it: on 2026-08-29 a 1.0 s interval drew a
+# steady stream of `429 Too Many Requests` from adsb.lol.  2.0 s halves the
+# request rate and still leaves 5x margin against the 10 s track expiry, so the
+# display stays populated between polls.
 SOURCES = {
-    'adsb_lol':       ('adsb.lol',        1.0),
-    'airplanes_live': ('airplanes.live',  1.0),
+    'adsb_lol':       ('adsb.lol',        2.0),
+    'airplanes_live': ('airplanes.live',  2.0),
     'opensky':        ('OpenSky',        10.0),
 }
 
@@ -261,8 +266,24 @@ class InternetFeeder(threading.Thread):
         return pushed
 
     def run(self):
+        # Backoff caps, and why there are two.
+        #
+        # A single 429 used to double the backoff toward a 30 s cap while
+        # tracks expire after 10 s, so one throttled poll blanked the whole
+        # display for 15+ seconds -- aircraft appeared for ~10 s, faded to
+        # predicted, vanished, and repeated on a 25 s cycle.  The transient
+        # cap is therefore kept BELOW the expiry window: a rate-limit blip
+        # costs a frame or two, not the screen.
+        #
+        # A persistently failing feed is a different problem and must not be
+        # retried every few seconds forever -- airplanes.live has been
+        # answering 403 to everything, including /ping, since at least
+        # 2026-08-29.  After a run of consecutive failures the cap opens up so
+        # a dead endpoint is polled sparingly.
         backoff = self.interval
-        cap = 120.0 if self.source == 'opensky' else 30.0
+        fails = 0
+        transient_cap = 8.0
+        persistent_cap = 120.0 if self.source == 'opensky' else 120.0
         while not self._stop.is_set():
             if self.should_poll is not None and not self.should_poll():
                 # No consumers right now (e.g. no web clients) — stay idle and
@@ -287,10 +308,15 @@ class InternetFeeder(threading.Thread):
                 self.engine.report_feeder(
                     self.name_id, f'connected {self.label} ({n} ac in {self.radius_nm:g} NM)')
                 backoff = self.interval
+                fails = 0
             except Exception as e:
+                fails += 1
                 self.engine.report_feeder(
-                    self.name_id, f'{self.label} error: {type(e).__name__}: {e}')
+                    self.name_id,
+                    f'{self.label} error: {type(e).__name__}: {e}'
+                    + (f' (x{fails})' if fails > 1 else ''))
                 self._stop.wait(backoff)
+                cap = transient_cap if fails < 5 else persistent_cap
                 backoff = min(backoff * 2, cap)
                 continue
             self._stop.wait(self.interval)
