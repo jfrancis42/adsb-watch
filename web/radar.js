@@ -25,6 +25,9 @@ class RadarDisplay {
         this.observer = null;
         this.tracks = [];
         this.history = {};
+        // icao -> {n_number, manufacturer, model, owner}.  Static per aircraft,
+        // so the server sends it once and later frames omit it.
+        this.registry = {};
         this.trailSeconds = 300.0;  // overwritten by the server's full frame
         this.facilities = null;
         this.overlay = null;  // Static KML overlay (polygons/lines/points), sent once on connect
@@ -222,6 +225,18 @@ class RadarDisplay {
         this.observer = data.observer;
         this.tracks = data.tracks;
 
+        // Re-attach registry metadata the server sent once and now omits.
+        for (const t of this.tracks) {
+            if (t.n_number !== undefined) {
+                this.registry[t.icao] = {n_number: t.n_number, manufacturer: t.manufacturer,
+                                         model: t.model, owner: t.owner};
+            } else {
+                const reg = this.registry[t.icao];
+                if (reg) { t.n_number = reg.n_number; t.manufacturer = reg.manufacturer;
+                           t.model = reg.model; t.owner = reg.owner; }
+            }
+        }
+
         // The server sends ONE full frame per connection and deltas after it.
         // Before this, every frame carried the complete history (591 KiB) and
         // facilities (62 KiB) three times a second -- 16.6 Mbit/s per viewer.
@@ -242,7 +257,10 @@ class RadarDisplay {
             // Aircraft the server has aged out; without this the trail is
             // kept forever, which a full snapshot used to prevent implicitly.
             if (data.history_purge) {
-                for (const icao of data.history_purge) delete this.history[icao];
+                for (const icao of data.history_purge) {
+                    delete this.history[icao];
+                    delete this.registry[icao];   // server re-announces if it returns
+                }
             }
             // Trim locally to the same window the server uses, or trails grow
             // without bound now that nothing replaces them wholesale.

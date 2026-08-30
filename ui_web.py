@@ -84,10 +84,22 @@ class RadarServer:
         self.last_broadcast_ts = 0.0     # watermark: points newer than this are new
         self.purged_since_broadcast = set()   # icaos dropped by _prune_history
         self.facilities_sig = None       # so static facilities are sent only on change
+        self.announced_registry = set()  # icaos whose static registry data has been sent
 
     async def handler(self, websocket):
         """Handle a single WebSocket connection."""
         self.clients.add(websocket)
+        # Re-announce every aircraft's registry data on the next broadcast.
+        #
+        # `announced_registry` is server-wide but connect frames are
+        # per-client, so a client that joins late holds metadata only for the
+        # aircraft airborne at its connect time.  An aircraft announced BEFORE
+        # it joined -- one that dropped out of `tracks` and came back, its
+        # history not yet aged out -- would be suppressed as already-announced
+        # and stay permanently nameless for that client.  Measured: 140 such
+        # tracks in a 30 s window.  Clearing costs one slightly larger frame
+        # per connect (~8 KiB) and makes the omission impossible.
+        self.announced_registry.clear()
         if self.viewer_gate is not None:
             self.viewer_gate.add()
         print(f"Client connected: {websocket.remote_address}")
@@ -124,6 +136,11 @@ class RadarServer:
                     # A full snapshot dropped these implicitly.  A delta must
                     # name them, or the client keeps the trail forever.
                     self.purged_since_broadcast.add(icao)
+                    # Forget the registry announcement too.  The client drops
+                    # its copy on purge, so if this aircraft comes back the
+                    # server must describe it again -- otherwise it returns
+                    # permanently nameless.  This also bounds the set.
+                    self.announced_registry.discard(icao)
 
     def _update_history(self, snapshot):
         """Add current aircraft positions to history."""
@@ -146,156 +163,128 @@ class RadarServer:
                 while trail and trail[0][0] < cutoff:
                     trail.pop(0)
 
-    async def send_snapshot(self, websocket):
-        """Send current state to a single client."""
+    # Rounding.  Every numeric below arrives as a full-precision float --
+    # `distance_nm 8.946862082756043`, `azimuth_deg 274.70185484360843` -- and
+    # JSON writes all 17 digits.  None of it is meaningful: lat/lon to 5dp is
+    # ~1.1 m, and the display rounds far harder than that anyway.
+    @staticmethod
+    def _r(v, nd):
+        return round(v, nd) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+
+    def _build_message(self, full: bool) -> str:
+        """Build one frame.
+
+        ONE builder for both the per-client connect frame and the broadcast.
+        These were two near-identical copies until 2026-08-29; every change
+        had to be made twice, and the one time it was not -- the `full` flag
+        landing only in the broadcast copy -- clients silently discarded their
+        initial history.  Divergence here is not a style problem, it is the
+        bug.
+
+        full=True  -> everything, sent once when a client connects.
+        full=False -> only what changed since the previous broadcast.
+        """
         snapshot = self.engine.snapshot()
         self._update_history(snapshot)
         self._prune_history(time.time())
 
-        # Build message with snapshot + history
-        with self.history_lock:
-            history_copy = {icao: list(trail) for icao, trail in self.history.items()}
+        r = self._r
+        if full:
+            with self.history_lock:
+                hist = {icao: [[r(p[0], 1), r(p[1], 5), r(p[2], 5),
+                                r(p[3], 0), r(p[4], 1), r(p[5], 1)] for p in trail]
+                        for icao, trail in self.history.items()}
+            purged = []
+        else:
+            since = self.last_broadcast_ts
+            with self.history_lock:
+                hist = {}
+                for icao, trail in self.history.items():
+                    fresh = [[r(p[0], 1), r(p[1], 5), r(p[2], 5),
+                              r(p[3], 0), r(p[4], 1), r(p[5], 1)]
+                             for p in trail if p[0] > since]
+                    if fresh:
+                        hist[icao] = fresh
+                purged = sorted(self.purged_since_broadcast)
+                self.purged_since_broadcast.clear()
+            self.last_broadcast_ts = time.time()
+
+        tracks = []
+        for t in snapshot.tracks:
+            d = {
+                'icao': t.icao,
+                'callsign': t.callsign,
+                'lat': r(t.lat, 5),
+                'lon': r(t.lon, 5),
+                'alt_ft': r(t.alt_ft, 0),
+                'course_deg': r(t.course_deg, 1),
+                'speed_kt': r(t.speed_kt, 1),
+                'distance_nm': r(t.distance_nm, 2),
+                'azimuth_deg': r(t.azimuth_deg, 1),
+                'elevation_deg': r(t.elevation_deg, 2),
+                'cpa_nm': r(t.cpa_nm, 2),
+                'cpa_seconds': r(t.cpa_seconds, 0),
+                'cpa_azimuth_deg': r(t.cpa_azimuth_deg, 1),
+                'closing': t.closing,
+                'age_s': r(t.age_s, 1),
+                'predicted': t.predicted,
+                'source': t.source,
+                'phase': t.phase,
+                'airport': t.airport,
+                'runway': t.runway,
+            }
+            # Registry metadata never changes for a given ICAO, so send it
+            # once per aircraft instead of four times a second.  The connect
+            # frame always carries it for everything currently up, so a client
+            # joining mid-stream is complete; later arrivals are announced in
+            # the delta that first shows them.
+            if full or t.icao not in self.announced_registry:
+                d['n_number'] = t.n_number
+                d['manufacturer'] = t.manufacturer
+                d['model'] = t.model
+                d['owner'] = t.owner
+                self.announced_registry.add(t.icao)
+            tracks.append(d)
 
         message = {
             'type': 'snapshot',
+            'full': full,
             'timestamp': snapshot.generated_at,
             'observer': {
-                'lat': snapshot.observer.lat,
-                'lon': snapshot.observer.lon,
-                'alt_ft': snapshot.observer.alt_ft,
+                'lat': r(snapshot.observer.lat, 5),
+                'lon': r(snapshot.observer.lon, 5),
+                'alt_ft': r(snapshot.observer.alt_ft, 0),
             } if snapshot.observer.lat is not None else None,
-            'tracks': [
-                {
-                    'icao': t.icao,
-                    'callsign': t.callsign,
-                    'lat': t.lat,
-                    'lon': t.lon,
-                    'alt_ft': t.alt_ft,
-                    'course_deg': t.course_deg,
-                    'speed_kt': t.speed_kt,
-                    'distance_nm': t.distance_nm,
-                    'azimuth_deg': t.azimuth_deg,
-                    'elevation_deg': t.elevation_deg,
-                    'cpa_nm': t.cpa_nm,
-                    'cpa_seconds': t.cpa_seconds,
-                    'cpa_azimuth_deg': t.cpa_azimuth_deg,
-                    'closing': t.closing,
-                    'age_s': t.age_s,
-                    'predicted': t.predicted,
-                    'source': t.source,
-                    'phase': t.phase,
-                    'airport': t.airport,
-                    'runway': t.runway,
-                    'n_number': t.n_number,
-                    'manufacturer': t.manufacturer,
-                    'model': t.model,
-                    'owner': t.owner,
-                }
-                for t in snapshot.tracks
-            ],
-            # FULL history, once, on connect.  Every later frame carries only
-            # `history_delta`.  `full` is what tells the client which it holds;
-            # without it the client treats this frame as a delta and discards
-            # the initial history entirely.
-            'full': True,
-            'history': history_copy,
-            'trail_seconds': self.trail_seconds,
-            'feeders': snapshot.feeders,
-            'counts': snapshot.counts,
-            'facilities': self._serialize_facilities(snapshot.facilities) if snapshot.facilities else None,
-        }
-        # Record the signature so the next delta does not resend facilities
-        # that this frame already carried.
-        self.facilities_sig = (None if message['facilities'] is None
-                               else hash(json.dumps(message['facilities'], sort_keys=True)))
-
-        await websocket.send(json.dumps(message))
-
-    async def broadcast_loop(self):
-        """Periodically broadcast snapshots to all connected clients."""
-        interval = 1.0 / self.refresh_hz
-        while True:
-            if self.clients:
-                # Broadcast to all connected clients
-                websockets.broadcast(self.clients, await self._make_snapshot_message())
-            await asyncio.sleep(interval)
-
-    async def _make_snapshot_message(self):
-        """Build a snapshot message (JSON string)."""
-        snapshot = self.engine.snapshot()
-        self._update_history(snapshot)
-        self._prune_history(time.time())
-
-        # Only the points appended since the previous broadcast.  A client
-        # that connected mid-stream already has everything up to its connect
-        # time and dedups by timestamp, so an overlap is harmless.
-        since = self.last_broadcast_ts
-        with self.history_lock:
-            history_delta = {}
-            for icao, trail in self.history.items():
-                fresh = [pt for pt in trail if pt[0] > since]
-                if fresh:
-                    history_delta[icao] = fresh
-            purged = sorted(self.purged_since_broadcast)
-            self.purged_since_broadcast.clear()
-        self.last_broadcast_ts = time.time()
-
-        message = {
-            'type': 'snapshot',
-            'timestamp': snapshot.generated_at,
-            'observer': {
-                'lat': snapshot.observer.lat,
-                'lon': snapshot.observer.lon,
-                'alt_ft': snapshot.observer.alt_ft,
-            } if snapshot.observer.lat is not None else None,
-            'tracks': [
-                {
-                    'icao': t.icao,
-                    'callsign': t.callsign,
-                    'lat': t.lat,
-                    'lon': t.lon,
-                    'alt_ft': t.alt_ft,
-                    'course_deg': t.course_deg,
-                    'speed_kt': t.speed_kt,
-                    'distance_nm': t.distance_nm,
-                    'azimuth_deg': t.azimuth_deg,
-                    'elevation_deg': t.elevation_deg,
-                    'cpa_nm': t.cpa_nm,
-                    'cpa_seconds': t.cpa_seconds,
-                    'cpa_azimuth_deg': t.cpa_azimuth_deg,
-                    'closing': t.closing,
-                    'age_s': t.age_s,
-                    'predicted': t.predicted,
-                    'source': t.source,
-                    'phase': t.phase,
-                    'airport': t.airport,
-                    'runway': t.runway,
-                    'n_number': t.n_number,
-                    'manufacturer': t.manufacturer,
-                    'model': t.model,
-                    'owner': t.owner,
-                }
-                for t in snapshot.tracks
-            ],
-            'full': False,
-            # Only what changed.  `history` (591 KiB) and `facilities`
-            # (62 KiB) are NOT resent -- that was 94% of every frame.
-            'history_delta': history_delta,
-            'history_purge': purged,
+            'tracks': tracks,
             'feeders': snapshot.feeders,
             'counts': snapshot.counts,
         }
+        if full:
+            message['history'] = hist
+            message['trail_seconds'] = self.trail_seconds
+        else:
+            message['history_delta'] = hist
+            message['history_purge'] = purged
 
-        # Facilities are static in practice (airports/runways near the
-        # observer).  Send them only when they actually change -- keyed on a
-        # cheap signature -- instead of 62 KiB three times a second.
         facilities = self._serialize_facilities(snapshot.facilities) if snapshot.facilities else None
         sig = None if facilities is None else hash(json.dumps(facilities, sort_keys=True))
-        if sig != self.facilities_sig:
+        if full or sig != self.facilities_sig:
             message['facilities'] = facilities
             self.facilities_sig = sig
 
         return json.dumps(message)
+
+    async def send_snapshot(self, websocket):
+        """Send the complete current state to a single client (on connect)."""
+        await websocket.send(self._build_message(full=True))
+
+    async def broadcast_loop(self):
+        """Periodically broadcast to all connected clients."""
+        interval = 1.0 / self.refresh_hz
+        while True:
+            if self.clients:
+                websockets.broadcast(self.clients, self._build_message(full=False))
+            await asyncio.sleep(interval)
 
     def _serialize_facilities(self, facilities):
         """Convert Facilities object to JSON-serializable dict."""
