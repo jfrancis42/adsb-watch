@@ -130,13 +130,36 @@
           # the hub vhost fronts both -- see skynet configure.yml, tag
           # nginx_adsb.  radar.js picks ws://host:{{ ws_port }} over plain http
           # and wss://host/ws over TLS, so BOTH ports matter.
+          #
+          # --expiry 30 (default 10) because this instance is fed by an
+          # aggregator, not by RF.  adsb.lol rate-limits, and a 429 backs the
+          # poller off 2 -> 4 -> 8 s; with a 10 s expiry the whole fleet was
+          # deleted before the next successful poll, so aircraft appeared for
+          # ~10 s, faded, vanished, and repeated on a ~27 s cycle.  A 10 s
+          # expiry is right for RF, where silence really does mean out of
+          # range; for a polled feed it just means "between polls".
+          # --predict-stale 8 keeps the UI honest about what is dead-reckoned.
+          #
+          # THIS PLAYBOOK IS THE ONLY WRITER of the deployed unit.  The
+          # in-repo adsb-watch.service is a reference copy; the two silently
+          # diverged once already (the deployed unit carried these two flags
+          # and this template did not, so a deploy would have quietly undone
+          # them), so keep them in step or delete the other one.
+          #
+          # The web scope-centre selector is left ENABLED here.  There is one
+          # observer, so any viewer who re-centres moves the scope for
+          # everyone -- acceptable now that the public vhost is behind basic
+          # auth (skynet configure.yml, tag nginx_adsb).  Add
+          # --no-web-recenter below to refuse it outright.
           ExecStart={{ app_dir }}/venv/bin/python3 {{ app_dir }}/main.py \
               --web --web-port {{ ws_port }} --http-port {{ http_port }} \
               --no-launch-dump1090 \
               --kml \
               --fixed-lat 39.3553696 --fixed-lon -104.6729929 --fixed-alt-ft 6750 \
               --govt-data-url {{ govt_data_url }} \
-              --internet
+              --internet \
+              --expiry 30 \
+              --predict-stale 8
           Restart=always
           RestartSec=5
           StandardOutput=journal
