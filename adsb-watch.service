@@ -23,6 +23,19 @@ Environment=PYTHONUNBUFFERED=1
 # polls".  At 30 s a backoff makes aircraft go dim (dead-reckoned), not gone.
 # The UI still marks anything over PREDICT_STALE_THRESHOLD_S (3 s) predicted,
 # so nothing is presented as fresher than it is.
+# REFERENCE COPY ONLY -- ansible/provision.yml writes the unit that actually
+# runs on 10.1.17.41, and it is the authoritative one. These two diverged once
+# (the deployed unit had --expiry/--predict-stale and the playbook did not, so
+# a deploy would have silently undone them). Change both or neither.
+#
+# NOTE the govt-data URL below is stale: govt-data moved off dmz to
+# 10.1.17.42, and 10.1.17.20:8091 no longer answers. provision.yml has the
+# current address.
+#
+# The web scope-centre selector is enabled. There is one observer, so any
+# viewer who re-centres moves the scope for everyone -- acceptable because the
+# public vhost is behind basic auth (skynet configure.yml, tag nginx_adsb).
+# Add --no-web-recenter to refuse it outright.
 ExecStart=/home/jfrancis/adsb-watch/venv/bin/python3 /home/jfrancis/adsb-watch/main.py \
     --web --web-port 8765 --http-port 8086 \
     --no-launch-dump1090 \
