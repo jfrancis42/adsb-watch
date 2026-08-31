@@ -9,7 +9,7 @@ import json
 import time
 import threading
 from dataclasses import asdict
-from typing import Optional
+from typing import Callable, Optional
 try:
     import websockets
 except ImportError:
@@ -51,14 +51,164 @@ class ViewerGate:
             return (time.time() - self._last_active) < self._linger_s
 
 
+class CenterControl:
+    """Applies scope re-centring requests coming from web clients.
+
+    **This is deliberately global.** The engine holds exactly one observer, so
+    a client that re-centres moves the scope for every connected viewer. That
+    is not a shortcut, it is the only arrangement that produces a working
+    display: the internet feeders query a bounding box around the observer and
+    FacilitiesClient fetches airports around it, so a per-client centre would
+    draw an empty scope over a location no data was ever requested for. Making
+    it per-client means giving every viewer their own feed set, airport fetch
+    and CPA geometry — a different program.
+
+    On a public instance where anonymous viewers should not be able to yank
+    the display out from under each other, pass ``allow=False``
+    (``main.py --no-web-recenter``); the control then refuses politely and the
+    UI hides the box.
+
+    `resolver` is ``lookup_airport``-shaped: ``code -> AirportFix``, raising
+    ``AirportLookupError``. It is injected rather than imported so this module
+    keeps knowing nothing about govt-data, the same reason main.py owns the
+    facilities bridge.
+    """
+
+    HOME = 'HOME'
+    # Cheapest possible abuse brake: one lookup per connection per interval.
+    # Each miss is an HTTP round-trip to govt-data, and the input is a text
+    # box on a public page.
+    COOLDOWN_S = 0.5
+
+    def __init__(self, engine, resolver: Optional[Callable] = None,
+                 on_change: Optional[Callable] = None, allow: bool = True,
+                 error_cls: type = Exception):
+        self.engine = engine
+        self.resolver = resolver
+        self.on_change = on_change
+        self.allow = allow and resolver is not None
+        self.error_cls = error_cls
+
+    # ---- helpers --------------------------------------------------------
+
+    def _state(self) -> dict:
+        st = self.engine.observer_state()
+        st['enabled'] = self.allow
+        return st
+
+    def _ok(self, message, **extra) -> dict:
+        return {'ok': True, 'message': message, **self._state(), **extra}
+
+    def _err(self, message, **extra) -> dict:
+        return {'ok': False, 'message': message, **self._state(), **extra}
+
+    def _changed(self):
+        if self.on_change is not None:
+            try:
+                self.on_change()
+            except Exception as e:          # a nudge failing must not 500 the UI
+                print(f'centre-change hook failed: {type(e).__name__}: {e}')
+
+    # ---- commands -------------------------------------------------------
+
+    def set_gps(self, enabled: bool) -> dict:
+        """Hand the centre back to gpsd, or take it away from gpsd."""
+        st = self.engine.observer_state()
+        if enabled and not st['gps_available']:
+            return self._err('No GPS receiver on this instance — the centre '
+                             'is always chosen manually here.')
+        if not self.allow:
+            return self._err('Manual centring is disabled on this instance.')
+        mode = self.engine.set_observer_manual(not enabled)
+        if mode == 'gps':
+            # The scope does not move until gpsd speaks; say so, or a user
+            # watching a stationary display thinks the click did nothing.
+            return self._ok('GPS enabled — centring on the next fix.')
+        return self._ok('GPS disabled — centre it manually.')
+
+    def set_airport(self, code: str) -> dict:
+        """Centre on an airport code, or the magic code HOME.
+
+        Blocking: performs an HTTP lookup. Call it off the event loop.
+        """
+        if not self.allow:
+            return self._err('Manual centring is disabled on this instance.')
+        code = (code or '').strip().upper()
+        if not code:
+            return self._err('Enter an airport code, or HOME.')
+
+        st = self.engine.observer_state()
+        # The user's rule: GPS wins. Refusing (rather than silently latching)
+        # is what makes the GPS indicator mean something — you have to turn it
+        # off on purpose before the scope will stay where you put it.
+        if st['source'] == 'gps' and st['gps_available']:
+            return self._err('GPS is driving the centre. Click the GPS '
+                             'indicator to switch it off first.')
+
+        if code == self.HOME:
+            home = self.engine.home()
+            if home is None:
+                # Started under gpsd: "home" is wherever the receiver is, so
+                # HOME means "give it back to GPS" rather than an error.
+                if st['gps_available']:
+                    res = self.set_gps(True)
+                    res['message'] = ('HOME on this instance is the GPS '
+                                      'position — GPS re-enabled.')
+                    return res
+                return self._err('No HOME position configured '
+                                 '(start with --fixed-lat/--fixed-lon or '
+                                 '--airport).')
+            lat, lon, elev_ft = home
+            self.engine.set_center(lat, lon, elev_ft, label=self.HOME)
+            self._changed()
+            return self._ok(f'Centred on HOME ({lat:.4f}, {lon:.4f}, '
+                            f'{elev_ft:.0f} ft).', ident=self.HOME)
+
+        try:
+            fix = self.resolver(code)
+        except self.error_cls as e:
+            return self._err(str(e))
+        except Exception as e:              # network blip, bad JSON, …
+            return self._err(f'lookup failed: {type(e).__name__}: {e}')
+
+        self.engine.set_center(fix.lat, fix.lon, fix.elev_ft, label=fix.ident)
+        self._changed()
+        msg = (f'Centred on {fix.ident} ({fix.name}) at '
+               f'{fix.elev_ft:.0f} ft field elevation.')
+        if not getattr(fix, 'has_elevation', True):
+            # AGL is centre-relative, so a missing field elevation turns the
+            # AGL readout back into MSL. Say it rather than let it look right.
+            msg = (f'Centred on {fix.ident} ({fix.name}). No field elevation '
+                   f'on record — AGL readings will equal MSL.')
+        return self._ok(msg, ident=fix.ident)
+
+    # ---- dispatch -------------------------------------------------------
+
+    def handle(self, msg: dict) -> Optional[dict]:
+        """Route one decoded client command. Returns a reply dict, or None
+        if the command is not ours."""
+        cmd = msg.get('cmd')
+        if cmd == 'set_center':
+            return self.set_airport(msg.get('airport'))
+        if cmd == 'set_gps':
+            return self.set_gps(bool(msg.get('enabled')))
+        if cmd == 'get_center':
+            return self._ok('')
+        return None
+
+
 class RadarServer:
     """WebSocket server that broadcasts engine snapshots to all connected clients."""
 
     def __init__(self, engine, refresh_hz: float = 4.0, port: int = 8765,
-                 overlay: Optional[dict] = None, viewer_gate: Optional['ViewerGate'] = None):
+                 overlay: Optional[dict] = None, viewer_gate: Optional['ViewerGate'] = None,
+                 center_control: Optional['CenterControl'] = None):
         self.engine = engine
         self.refresh_hz = refresh_hz
         self.port = port
+        # Handles 'set_center' / 'set_gps' commands from clients. None in
+        # tests and in curses use; the control box stays hidden then.
+        self.center_control = center_control
         # Shared with the internet feeders so they only poll when a client is
         # watching. None in local/curses use, where the feeders always poll.
         self.viewer_gate = viewer_gate
@@ -111,9 +261,18 @@ class RadarServer:
             # Send initial snapshot immediately
             await self.send_snapshot(websocket)
             # Keep connection alive and handle any incoming messages
+            last_cmd_at = 0.0
             async for message in websocket:
-                # Future: handle control messages (zoom, trail length, etc.)
-                print(f"Received message from client: {message}")
+                now = time.time()
+                if now - last_cmd_at < CenterControl.COOLDOWN_S:
+                    # Answer rather than drop: a swallowed command is a text
+                    # box that looks broken.
+                    await websocket.send(json.dumps({
+                        'type': 'center_result', 'ok': False,
+                        'message': 'Slow down a moment.'}))
+                    continue
+                last_cmd_at = now
+                await self._handle_command(websocket, message)
         except websockets.exceptions.ConnectionClosedOK:
             pass
         except websockets.exceptions.ConnectionClosed as e:
@@ -123,6 +282,35 @@ class RadarServer:
             self.clients.discard(websocket)
             if self.viewer_gate is not None:
                 self.viewer_gate.remove()
+
+    async def _handle_command(self, websocket, message):
+        """Decode and apply one client control message.
+
+        Every failure path answers the client. A silently-dropped command
+        leaves a text box that looks like it did nothing, which is
+        indistinguishable from a broken server.
+        """
+        try:
+            msg = json.loads(message)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(msg, dict):
+            return
+        if self.center_control is None:
+            await websocket.send(json.dumps({
+                'type': 'center_result', 'ok': False, 'enabled': False,
+                'message': 'This server has no centre control.'}))
+            return
+        # set_airport() does a blocking HTTP lookup with a 15 s timeout —
+        # running it inline would stall the broadcast loop for every viewer.
+        reply = await asyncio.to_thread(self.center_control.handle, msg)
+        if reply is None:
+            return
+        reply['type'] = 'center_result'
+        try:
+            await websocket.send(json.dumps(reply))
+        except websockets.exceptions.ConnectionClosed:
+            pass
 
     def _prune_history(self, now: float):
         """Remove history for aircraft that haven't been seen in 15 minutes."""
@@ -255,6 +443,20 @@ class RadarServer:
                 'lon': r(snapshot.observer.lon, 5),
                 'alt_ft': r(snapshot.observer.alt_ft, 0),
             } if snapshot.observer.lat is not None else None,
+            # Centre provenance, kept OUT of `observer` on purpose: `observer`
+            # is null until there is a fix, and the centre controls have to
+            # render before then — under gpsd, "waiting for a fix" is exactly
+            # when you might want to pin the scope somewhere by hand. Four
+            # fields at 4 Hz is nothing; it rides the delta too because
+            # another viewer can change it at any time.
+            'center': {
+                'source': snapshot.observer.source,
+                'label': snapshot.observer.label,
+                'gps_available': snapshot.observer.gps_available,
+                'awaiting_fix': snapshot.observer.awaiting_fix,
+                'recenter_enabled': (self.center_control is not None
+                                     and self.center_control.allow),
+            },
             'tracks': tracks,
             'feeders': snapshot.feeders,
             'counts': snapshot.counts,
@@ -326,10 +528,11 @@ class RadarServer:
 
 
 def run(engine, refresh_hz: float = 4.0, port: int = 8765, http_port: int = 8080,
-        overlay: Optional[dict] = None, viewer_gate: Optional['ViewerGate'] = None):
+        overlay: Optional[dict] = None, viewer_gate: Optional['ViewerGate'] = None,
+        center_control: Optional['CenterControl'] = None):
     """Entry point for web UI. Starts WebSocket server and HTTP server for static files."""
     server = RadarServer(engine, refresh_hz, port, overlay=overlay,
-                         viewer_gate=viewer_gate)
+                         viewer_gate=viewer_gate, center_control=center_control)
 
     # Start HTTP server for static files in a background thread
     import http.server

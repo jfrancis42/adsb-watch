@@ -61,6 +61,7 @@ Threading model:
 | `web/radar.html`| HTML5 Canvas radar display with CRT phosphor effect               |
 | `web/radar.js`  | JavaScript radar rendering + WebSocket client                     |
 | `main.py`       | argparse + wiring                                                 |
+| `test_center.py`| scope-centring rules (GPS override, HOME, field elevation)         |
 | `probe.py`      | troubleshooting helper                                            |
 
 ## Display data flow (one frame)
@@ -95,6 +96,19 @@ list[Track]  (immutable; sorted by ui_curses by chosen mode)
 - `Track` field order matters: dataclass fields with defaults must follow
   fields without. `age_s` is positional; phase/airport/runway/registry
   fields are at the end with defaults.
+- **There is exactly one observer**, and it is the scope centre, the origin of
+  every distance/azimuth/CPA, the centre of the facilities fetch, and the
+  centre of the internet feeders' bounding box. Anything that "moves the map"
+  moves all of that. There is no such thing as a display-only pan here.
+- `Observer.source` / `.label` / `.gps_available` are stamped onto the copy
+  `snapshot()` hands out, not stored on `_observer` — `update_observer()`
+  rebuilds that object wholesale and would otherwise have to remember to carry
+  them across. `source` says what is *in control* ('gps' whenever a GpsFeeder
+  exists and hasn't been switched off, fix or no fix), not whether a position
+  is known; "no fix" shows up as a null observer position.
+- The manual latch (`_observer_manual`) makes gpsd updates a no-op. Releasing
+  it does **not** move the observer — the scope stays put until gpsd speaks, so
+  a momentary loss of fix doesn't blank the display or teleport it to (0, 0).
 
 ## Caching (cache.py)
 
@@ -161,8 +175,11 @@ Tunables are constants at the top of `phase.py`. Closed runways are skipped.
 Endpoints used:
 - `GET /aircraft/hex/{icao_hex}` — FAA registry by Mode S hex
 - `GET /airports/{ident}` — single airport lookup by ICAO/IATA/GPS/FAA-local
-  code. `airports.resolve_airport()` uses this for `--airport` (center the
-  scope on a named airport); returns `latitude_deg`/`longitude_deg`/`elevation_ft`.
+  code. `airports.lookup_airport()` uses this for `--airport` and for the web
+  UI's centre selector; returns an `AirportFix`
+  (ident/name/lat/lon/elev_ft/has_elevation). It returns a value rather than
+  stashing the name on the function object, because it is now called
+  concurrently from a thread pool serving web clients.
 - `GET /airports/near?lat&lon&radius_nm&limit` — airports in radius
 - `GET /airports/{ident}/runways` — runway endpoints + true headings
 - `GET /airports/{ident}/frequencies` — freqs in kHz (mostly cached, not yet
@@ -320,6 +337,50 @@ The web UI is a WebSocket server + HTML5 Canvas radar display:
 Launch with `python3 main.py --web --fixed-lat ... --fixed-lon ... --fixed-alt-ft ...`,
 then open `http://localhost:8080/radar.html`. WebSocket port 8765, HTTP port 8080
 (both configurable).
+
+### Choosing the scope centre (web UI)
+
+A **Center** box in the status bar takes an airport code (`KPAE`, `S43`, `DEN`)
+or the magic code `HOME`, and the GPS lamp is a **button** that hands the
+centre to gpsd or takes it back. Full user-facing description in `WEB_UI.md`.
+
+Shape of it:
+- `ui_web.CenterControl` owns the rules; `RadarServer` just decodes the
+  WebSocket message and hands it over. The govt-data resolver is **injected
+  from main.py**, same reason the facilities bridge lives there — `ui_web`
+  stays ignorant of govt-data.
+- `set_airport()` does a blocking HTTP lookup, so `_handle_command()` runs it
+  through `asyncio.to_thread`. Inline it and one client's 15 s timeout stalls
+  the broadcast loop for every viewer.
+- **It is one shared centre.** A client that re-centres moves the scope for
+  everyone connected. That is forced by the architecture, not chosen: the
+  internet feeders query a bbox around the observer and `FacilitiesClient`
+  fetches airports around it, so a per-client centre would render an empty
+  scope over a location no data was ever fetched for. Making it per-client
+  means per-client feeds, airport fetches and CPA geometry — a different
+  program. `--no-web-recenter` refuses the whole thing on a public instance.
+- **GPS overrides manual selection, by refusing it.** With a GpsFeeder running,
+  `set_airport()` returns an error telling you to switch GPS off first, and the
+  client disables the input. Silently latching instead would make the GPS lamp
+  decorative.
+- **A manual centre must carry the field elevation.** AGL in the UI is
+  `alt_ft - observer.alt_ft`, so a centre pinned at 0 ft turns every AGL
+  readout into MSL without looking wrong. `AirportFix.has_elevation` exists so
+  the one case govt-data can't supply is *said out loud* rather than hidden.
+- `FacilitiesClient.wake()` is nudged on every centre change; without it the
+  new location has no airports drawn for up to 60 s and reads as broken. The
+  loop now waits on `_wake` rather than `_stop`, and `stop()` sets both so
+  shutdown stays prompt.
+- `Observer.awaiting_fix` exists so the readout doesn't label the manual
+  centre's coordinates "GPS" during the gap between handing control back to
+  gpsd and gpsd actually speaking. It is `last_seen < _gps_handback_at`.
+- The `center` block in the snapshot is deliberately **not** inside `observer`:
+  `observer` is null until there's a fix, and the controls must render before
+  then — under gpsd that is exactly when you'd want to pin the scope by hand.
+- Client-side, a centre jump sets `suppressAlertsUntil`. Every range changes at
+  once, so without it every aircraft "enters" or "leaves" in the same frame and
+  the browser plays a chord. States are still recorded, so the first real
+  crossing after the move isn't missed.
 
 ### KML/KMZ overlay (kml.py, web UI only)
 

@@ -73,13 +73,66 @@ Canvas rendering with phosphor persistence effect
 
 ### Status Bar
 - Observer position (lat, lon, altitude)
+- **Scope centre selector**: type an airport code (`KPAE`, `S43`, `DEN`) or the
+  magic code `HOME` and press Enter. See "Choosing the scope centre" below.
 - Track count and airport count
 - **Range selector**: 1, 2, 5, 10, 20, 50, 100 NM (default: 5 NM)
 - **Trail length selector**: None, 10s, 30s, 1min, 2min, 5min, Full (default: 30s)
 - **Projection time selector**: None, 15s, 30s, 60s (default: 60s)
 - **Alert range selector**: None, 0.5, 1, 2, 3, 5 NM (default: 1 NM)
 - **Sound effect toggles**: Approaching, Enter, Leave (all default on)
-- **Indicator lights**: ADS-B (green when connected), GPS (green when fix acquired)
+- **Indicator lights**: 1090 and 978 (green when that feeder is connected), GPS
+  (green when gpsd is driving the centre — it is also a button, see below)
+
+## Choosing the scope centre
+
+Type an airport code into the **Center** box and press Enter; the scope
+re-centres on that airport. `HOME` returns to whatever the instance was
+launched pointing at (`--fixed-lat/--fixed-lon/--fixed-alt-ft`, or `--airport`).
+
+The centre carries the airport's **field elevation**, so the AGL altitude mode
+stays honest after a move — `HOME` carries the elevation given as
+`--fixed-alt-ft`. If govt-data has no elevation for the chosen airport the
+confirmation says so, because AGL would otherwise silently be MSL.
+
+**GPS overrides manual selection.** On an instance with a gpsd feeder, the GPS
+lamp is lit and the Center box is disabled — gpsd owns the centre and would
+overwrite anything you typed on the next fix. Click the **GPS indicator** to
+switch it off; the box then works. Click it again to hand the centre back to
+gpsd. The scope does not jump when you re-enable GPS: it stays put until the
+next fix arrives, so a momentary loss of fix does not blank the display — the
+readout says `GPS (no fix yet)` until one does, because until then those are
+not GPS coordinates.
+
+The lamp has three states, because "I turned GPS off" and "there is no GPS
+here" are different facts:
+
+| GPS lamp | Meaning | Center box |
+|---|---|---|
+| green | gpsd is driving the centre | disabled |
+| dark, clickable | gpsd available but switched off | enabled |
+| dimmed, not clickable | no gpsd feeder on this instance | enabled |
+
+Instances started with `--fixed-lat`/`--airport` have no gpsd feeder at all, so
+their GPS lamp is dimmed and manual selection is always available. (Before this
+feature the lamp lit green whenever *any* position was known, which meant a
+green GPS light on a host with no GPS receiver.)
+
+### It is one shared centre
+
+The engine holds exactly **one** observer, so re-centring moves the scope for
+every connected viewer, and their status bar flashes the new centre label. This
+is not laziness: the internet feeders query a bounding box around the observer
+and `FacilitiesClient` fetches airports around it, so a purely client-side pan
+would draw an empty scope over a place no data was ever requested for. Airports
+and runways at the new centre appear once the facilities refetch completes —
+re-centring nudges that immediately (`FacilitiesClient.wake()`) instead of
+letting it wait out the 60 s poll, but the fetch itself is one request per
+airport in radius and takes a while.
+
+Run with **`--no-web-recenter`** on a public instance to refuse the whole thing;
+the Center box then stays hidden. `--airport` and the curses `o` prompt are
+unaffected.
 
 ## Coordinate Projection
 
@@ -108,6 +161,13 @@ This matches the curses UI's display logic and avoids expensive spherical projec
     "lat": 39.54,
     "lon": -104.76,
     "alt_ft": 5400
+  },
+  "center": {
+    "source": "manual",
+    "label": "HOME",
+    "gps_available": false,
+    "awaiting_fix": false,
+    "recenter_enabled": true
   },
   "tracks": [
     {
@@ -154,6 +214,42 @@ This matches the curses UI's display logic and avoids expensive spherical projec
 ```
 
 History entries: `[timestamp, lat, lon, alt_ft, course_deg, speed_kt]`
+
+`observer` is `null` until there is a position. `center` is always present —
+the controls have to render before the first fix, which under gpsd is exactly
+when you might want to pin the scope by hand. `source` is `gps` / `manual` /
+`unset` and describes what is *in control*, not whether a fix exists.
+`awaiting_fix` is true when gpsd is in control but has not spoken since it took
+over — the coordinates on screen are then the manual centre it replaced, and
+the readout says `GPS (no fix yet)` rather than labelling them GPS.
+
+### Client → server control messages
+
+```json
+{"cmd": "set_center", "airport": "KPAE"}   // or "HOME"
+{"cmd": "set_gps",    "enabled": false}
+```
+
+Each is answered to the requesting client only:
+
+```json
+{
+  "type": "center_result",
+  "ok": true,
+  "message": "Centred on KPAE (Seattle Paine Field International Airport) at 606 ft field elevation.",
+  "ident": "KPAE",
+  "source": "manual",
+  "label": "KPAE",
+  "gps_available": false,
+  "enabled": true
+}
+```
+
+Every refusal is an answer with `ok: false` and a message, never a dropped
+message — a silently-swallowed command is a text box that looks broken.
+Commands are rate-limited to one per connection per 0.5 s (each miss is an HTTP
+round-trip to govt-data, and the input is a text box on a public page). Other
+clients learn about the move from `center` in the next snapshot.
 
 ## Performance Notes
 
