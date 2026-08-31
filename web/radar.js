@@ -47,6 +47,23 @@ class RadarDisplay {
         // Track aircraft states for sound triggers
         this.aircraftStates = {}; // {icao: {wasApproaching: bool, wasInRange: bool}}
 
+        // Scope-centre control. The centre is server-side state (one engine
+        // observer), so this is a request/echo pair, not local state: we send
+        // a command and wait for the observer in the next snapshot to change.
+        // Everything on screen -- which aircraft exist, which airports are
+        // drawn, every distance and CPA -- is computed around that observer,
+        // which is why the centre cannot just be a client-side pan.
+        this.centerEnabled = false;   // server allows re-centring
+        this.gpsAvailable = false;    // a gpsd feeder exists at all
+        this.observerSource = 'unset';
+        this.centerLabel = null;
+        this.centerName = null;
+        this.centerMsgTimer = null;
+        // Suppress the chorus of enter/leave chimes that a centre jump would
+        // otherwise fire: every distance changes at once, so every aircraft
+        // "enters" or "leaves" in the same frame. Positions still update.
+        this.suppressAlertsUntil = 0;
+
         // Animation state for phosphor persistence
         this.lastFrame = performance.now();
         this.fadeCanvas = document.createElement('canvas');
@@ -89,6 +106,30 @@ class RadarDisplay {
 
         document.getElementById('sound-leave').addEventListener('change', (e) => {
             this.soundLeave = e.target.checked;
+        });
+
+        // Centre selector: Enter applies, Escape restores the current centre.
+        const centerInput = document.getElementById('center-input');
+        centerInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                const code = centerInput.value.trim().toUpperCase();
+                if (code) this.requestCenter(code);
+            } else if (e.key === 'Escape') {
+                centerInput.value = '';
+                centerInput.blur();
+            }
+        });
+
+        // Clicking the GPS lamp is how you take the centre away from gpsd --
+        // and give it back. Dead when the instance has no receiver.
+        document.getElementById('gps-indicator').addEventListener('click', () => {
+            if (!this.gpsAvailable) {
+                this.showCenterMessage(
+                    'No GPS receiver on this instance.', true);
+                return;
+            }
+            this.send({cmd: 'set_gps', enabled: this.observerSource !== 'gps'});
         });
 
         // Connect and start
@@ -138,6 +179,8 @@ class RadarDisplay {
                 this.handleSnapshot(data);
             } else if (data.type === 'overlay') {
                 this.overlay = data.overlay;
+            } else if (data.type === 'center_result') {
+                this.handleCenterResult(data);
             }
         };
     }
@@ -221,7 +264,104 @@ class RadarDisplay {
         osc.stop(now + 0.3);
     }
 
+    // ---- scope centre ------------------------------------------------
+
+    send(obj) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(obj));
+        } else {
+            this.showCenterMessage('Not connected.', true);
+        }
+    }
+
+    requestCenter(code) {
+        this.send({cmd: 'set_center', airport: code});
+    }
+
+    handleCenterResult(data) {
+        this.showCenterMessage(data.message, !data.ok);
+        if (data.ok) {
+            // Clear the box on success so it reads as "type the next one",
+            // not as a stale entry. The applied centre is named in the
+            // observer readout.
+            document.getElementById('center-input').value = '';
+        }
+    }
+
+    showCenterMessage(text, isError) {
+        const el = document.getElementById('center-msg');
+        if (!el || !text) return;
+        el.textContent = text;
+        el.classList.toggle('error', !!isError);
+        el.classList.add('show');
+        clearTimeout(this.centerMsgTimer);
+        // Errors linger; a success confirmation has done its job quickly.
+        this.centerMsgTimer = setTimeout(
+            () => el.classList.remove('show'), isError ? 8000 : 4000);
+    }
+
+    // Reflect server-side centre state into the controls. Called every frame
+    // because the centre is shared: another viewer can move it, and this
+    // client finds out the same way it finds out about aircraft.
+    updateCenterControls(center) {
+        if (!center) return;   // a server older than this feature
+        const box   = document.getElementById('center-control');
+        const input = document.getElementById('center-input');
+        const readout = document.getElementById('observer-pos');
+        const gpsInd = document.getElementById('gps-indicator');
+        const gpsLight = document.getElementById('gps-light');
+
+        this.centerEnabled  = !!center.recenter_enabled;
+        this.gpsAvailable   = !!center.gps_available;
+        this.observerSource = center.source || 'unset';
+
+        box.hidden = !this.centerEnabled;
+
+        // GPS is the override: while it drives the centre, manual entry is
+        // refused server-side, so the box is disabled rather than left to
+        // look available and then bounce.
+        const gpsDriving = this.observerSource === 'gps';
+        input.disabled = gpsDriving;
+        input.title = gpsDriving
+            ? 'GPS is driving the centre — click the GPS indicator to turn it off.'
+            : 'Airport code (KPAE, S43, DEN) or HOME. Press Enter.';
+
+        const newLabel = center.label || null;
+        // Don't label somebody else's coordinates "GPS": right after a
+        // handback the position on screen is still the manual centre.
+        this.centerName = gpsDriving
+            ? (center.awaiting_fix ? 'GPS (no fix yet)' : 'GPS')
+            : (newLabel || 'manual');
+        if (newLabel !== this.centerLabel) {
+            this.centerLabel = newLabel;
+            readout.classList.add('flash');
+            setTimeout(() => readout.classList.remove('flash'), 700);
+        }
+
+        // Three GPS states, kept distinguishable: driving / off but available
+        // / no receiver here. A single on-off lamp would make "I turned it
+        // off" and "there is nothing to turn on" look identical.
+        gpsLight.classList.toggle('on', gpsDriving);
+        gpsInd.classList.toggle('clickable', this.gpsAvailable);
+        gpsInd.classList.toggle('unavailable', !this.gpsAvailable);
+        gpsInd.title = !this.gpsAvailable
+            ? 'No GPS receiver on this instance — the centre is set manually.'
+            : (gpsDriving ? 'GPS is centring the scope. Click to take manual control.'
+                          : 'Manual centring. Click to hand the centre back to GPS.');
+    }
+
     handleSnapshot(data) {
+        // A centre jump invalidates every distance at once. Note it before
+        // overwriting this.observer so the alert suppression can see the move.
+        if (this.observer && data.observer) {
+            const dLat = data.observer.lat - this.observer.lat;
+            const dLon = data.observer.lon - this.observer.lon;
+            const nmLon = 60.0 * Math.cos(this.observer.lat * Math.PI / 180);
+            // ~1 NM: bigger than any GPS wander, smaller than any re-centre.
+            if (Math.hypot(dLat * 60.0, dLon * nmLon) > 1.0) {
+                this.suppressAlertsUntil = Date.now() + 3000;
+            }
+        }
         this.observer = data.observer;
         this.tracks = data.tracks;
 
@@ -281,9 +421,13 @@ class RadarDisplay {
         this.checkSoundTriggers();
 
         // Update status bar
+        this.updateCenterControls(data.center);
         if (this.observer) {
+            // One readout, not two: the centre's name and its coordinates are
+            // the same fact, and the status bar has no width to spare.
+            const named = this.centerName ? `${this.centerName}  ` : '';
             document.getElementById('observer-pos').textContent =
-                `Observer: ${this.observer.lat.toFixed(4)}, ${this.observer.lon.toFixed(4)} @ ${Math.round(this.observer.alt_ft)} ft`;
+                `Observer: ${named}${this.observer.lat.toFixed(4)}, ${this.observer.lon.toFixed(4)} @ ${Math.round(this.observer.alt_ft)} ft`;
         }
 
         const airportCount = this.facilities?.airports?.length || 0;
@@ -292,7 +436,6 @@ class RadarDisplay {
         // Update indicator lights
         const adsbLight = document.getElementById('adsb-light');
         const uatLight = document.getElementById('uat-light');
-        const gpsLight = document.getElementById('gps-light');
 
         // A feeder counts as "on" when connected / passing messages.
         const feederOn = (name) => {
@@ -312,14 +455,20 @@ class RadarDisplay {
         // (no uat-978 feeder is ever reported).
         setLight(uatLight, feederOn('uat-978'));
 
-        // GPS light: on if observer position is set.
-        setLight(gpsLight,
-            this.observer && this.observer.lat !== null && this.observer.lon !== null);
+        // The GPS lamp is driven by updateCenterControls(), not here. It no
+        // longer means "we have a position" -- with --fixed-lat/--airport we
+        // always have one and there is no receiver, so the old rule lit a
+        // green GPS light on an instance with no GPS. It now means "gpsd is
+        // driving the centre", which is the thing you click it to change.
     }
 
     checkSoundTriggers() {
         if (!this.tracks || this.alertRangeNM === 0) return;
 
+        // Just after a centre change every range is different, so states are
+        // still recorded -- otherwise the first real crossing after the move
+        // would be missed -- but nothing is played.
+        const quiet = Date.now() < this.suppressAlertsUntil;
         const currentIcaos = new Set();
 
         for (const track of this.tracks) {
@@ -333,19 +482,21 @@ class RadarDisplay {
             const prevState = this.aircraftStates[track.icao] || { wasApproaching: false, wasInRange: false };
 
             // Trigger sounds on state transitions
-            if (isApproaching && !prevState.wasApproaching && !isInRange) {
-                // Just started approaching (not yet in range)
-                this.playApproachingSound();
-            }
+            if (!quiet) {
+                if (isApproaching && !prevState.wasApproaching && !isInRange) {
+                    // Just started approaching (not yet in range)
+                    this.playApproachingSound();
+                }
 
-            if (isInRange && !prevState.wasInRange) {
-                // Just entered range
-                this.playEnterSound();
-            }
+                if (isInRange && !prevState.wasInRange) {
+                    // Just entered range
+                    this.playEnterSound();
+                }
 
-            if (!isInRange && prevState.wasInRange) {
-                // Just left range
-                this.playLeaveSound();
+                if (!isInRange && prevState.wasInRange) {
+                    // Just left range
+                    this.playLeaveSound();
+                }
             }
 
             // Update state

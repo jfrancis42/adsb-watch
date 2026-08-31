@@ -64,6 +64,24 @@ class Observer:
     lon: Optional[float] = None
     alt_ft: float = 0.0
     last_seen: float = 0.0
+    # --- provenance, stamped by Engine.snapshot() ------------------------
+    # `source` says what is driving the scope centre, which is the whole
+    # question a UI needs answered before it offers a manual centre control:
+    #   'gps'    — a live gpsd fix is moving it; manual selection is refused.
+    #   'manual' — pinned by --fixed-*/--airport, the curses 'o' prompt, or a
+    #              web client picking an airport. gpsd updates are ignored.
+    #   'unset'  — no position yet.
+    # `label` names the manual centre ('HOME', 'KPAE'); None under GPS.
+    # `gps_available` is False when no GpsFeeder is running at all, which is
+    # what stops a UI from offering a GPS toggle with nothing behind it.
+    source: str = 'unset'
+    label: Optional[str] = None
+    gps_available: bool = False
+    # True when GPS is nominally in control but has not supplied a fix since
+    # it took over, so the position on display came from somewhere else (the
+    # manual centre it replaced). Without this the readout labels a pinned
+    # airport's coordinates "GPS", which is simply untrue.
+    awaiting_fix: bool = False
 
 
 @dataclass
@@ -118,6 +136,22 @@ class Engine:
         self._lock = threading.RLock()
         self._aircraft: dict[str, Aircraft] = {}
         self._observer = Observer()
+        # Manual-centre latch. While True, gpsd fixes are dropped on the floor
+        # — see update_observer(). Set by --fixed-*/--airport, the curses 'o'
+        # prompt, or a web client choosing an airport; cleared by handing
+        # control back to GPS via set_observer_manual(False).
+        self._observer_manual = False
+        self._observer_label: Optional[str] = None
+        # The startup centre, re-selected by the magic code 'HOME'. Carries
+        # its own elevation so AGL readouts are referenced to the ground at
+        # home, not to sea level. None when gpsd is the source of truth.
+        self._home: Optional[tuple[float, float, float]] = None
+        # Whether a GpsFeeder exists. Purely informational: it tells UIs
+        # whether "turn GPS back on" is a thing they can offer.
+        self._gps_available = False
+        # When the centre was last handed back to gpsd. A position older than
+        # this was not set by GPS, however much GPS is now in charge.
+        self._gps_handback_at = 0.0
         self.expiry_s = expiry_s
         self.cpa_threshold_nm = cpa_threshold_nm
         # How long a local (RTL-SDR) position fix suppresses internet position
@@ -146,17 +180,101 @@ class Engine:
 
     # ----- feeder API ------------------------------------------------------
 
-    def update_observer(self, lat, lon, alt_ft=0.0, *, manual: bool = False):
-        """Set observer position. `manual=True` (the UI's 'o' prompt or
-        --fixed-* flags) latches the position so subsequent gpsd updates
-        won't overwrite it. Pass manual=False from gpsd."""
+    def update_observer(self, lat, lon, alt_ft=0.0, *, manual: bool = False,
+                        label: Optional[str] = None):
+        """Set observer position. `manual=True` (the UI's 'o' prompt, the
+        --fixed-*/--airport flags, or a web client picking an airport) latches
+        the position so subsequent gpsd updates won't overwrite it. Pass
+        manual=False from gpsd.
+
+        `alt_ft` is the elevation of the centre, not of any aircraft — UIs
+        subtract it to show AGL, so a manual centre must pass the field
+        elevation of the airport it named, or AGL silently becomes MSL.
+        `label` is a display name for a manual centre ('HOME', 'KPAE').
+        """
         with self._lock:
-            if getattr(self, '_observer_manual', False) and not manual:
+            if self._observer_manual and not manual:
                 return
             self._observer = Observer(lat=lat, lon=lon, alt_ft=alt_ft or 0.0,
                                       last_seen=time.time())
             if manual:
                 self._observer_manual = True
+                self._observer_label = label
+
+    # ----- centre selection (manual airport / HOME / GPS handback) --------
+
+    def set_home(self, lat, lon, alt_ft=0.0):
+        """Record the startup centre — what the magic code 'HOME' returns to.
+
+        Its elevation is stored with it because HOME is a place on the ground,
+        and the AGL readout is only correct if the centre carries the ground
+        height under it.
+        """
+        with self._lock:
+            self._home = (float(lat), float(lon), float(alt_ft or 0.0))
+
+    def home(self):
+        """The startup centre as (lat, lon, alt_ft), or None under gpsd."""
+        with self._lock:
+            return self._home
+
+    def set_gps_available(self, available: bool):
+        """Declare whether a GpsFeeder is running.
+
+        A UI must not offer "switch back to GPS" when nothing would ever set
+        the position again — that dead-ends the scope at wherever it was left.
+        """
+        with self._lock:
+            self._gps_available = bool(available)
+
+    def set_center(self, lat, lon, alt_ft=0.0, label=None):
+        """Pin the scope centre manually, naming it for the UIs."""
+        self.update_observer(lat, lon, alt_ft, manual=True, label=label)
+
+    def set_observer_manual(self, manual: bool) -> str:
+        """Latch or release manual centring. Returns the mode now in force.
+
+        Releasing does NOT move the observer. The scope stays where it is
+        until gpsd supplies a fix, which is what you want — a momentary loss
+        of fix should not blank the display or teleport it to (0, 0).
+        """
+        with self._lock:
+            self._observer_manual = bool(manual)
+            if not self._observer_manual:
+                self._observer_label = None
+                self._gps_handback_at = time.time()
+            return 'manual' if self._observer_manual else 'gps'
+
+    def observer_state(self) -> dict:
+        """Centre provenance, for UIs and control channels."""
+        with self._lock:
+            return {
+                'source': self._observer_source_locked(),
+                'label': self._observer_label,
+                'gps_available': self._gps_available,
+                'awaiting_fix': self._awaiting_fix_locked(),
+                'has_home': self._home is not None,
+            }
+
+    def _observer_source_locked(self) -> str:
+        """What is in control of the centre. Caller holds _lock.
+
+        Note this is about control, not about having a fix: with a GpsFeeder
+        running and no fix yet the source is still 'gps' — gpsd is what will
+        set the position, and a UI must not offer manual entry that the next
+        fix would immediately overwrite. "No fix" shows up separately, as a
+        null observer position.
+        """
+        if self._observer_manual:
+            return 'manual'
+        return 'gps' if self._gps_available else 'unset'
+
+    def _awaiting_fix_locked(self) -> bool:
+        """Caller holds _lock. True when gpsd is in control but the displayed
+        position predates the handback, so it is not a GPS position."""
+        return (not self._observer_manual
+                and self._gps_available
+                and self._observer.last_seen < self._gps_handback_at)
 
     def set_facilities(self, facilities):
         """Called by FacilitiesClient when the airport set has been refreshed."""
@@ -264,7 +382,14 @@ class Engine:
         now = time.time()
         with self._lock:
             self._expire(now)
-            obs = replace(self._observer)
+            # Stamp provenance onto the copy the UI sees. Kept out of the
+            # stored Observer so update_observer() can rebuild it wholesale
+            # without having to remember to carry these across.
+            obs = replace(self._observer,
+                          source=self._observer_source_locked(),
+                          label=self._observer_label,
+                          gps_available=self._gps_available,
+                          awaiting_fix=self._awaiting_fix_locked())
             # Only surface aircraft whose position is fresh — drop ICAOs we've
             # only heard squitter/velocity from, and drop ones whose last
             # position fix is older than expiry_s (even if they keep sending

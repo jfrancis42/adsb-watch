@@ -28,20 +28,41 @@ GRID_DEG = 0.25  # ~15 NM at mid-latitudes — coarse on purpose
 
 
 class AirportLookupError(Exception):
-    """Raised by resolve_airport() when the code can't be resolved."""
+    """Raised by lookup_airport() when the code can't be resolved."""
 
 
-def resolve_airport(base_url: str, user: str, password: str, ident: str,
-                    timeout: float = 15.0) -> tuple[float, float, float]:
-    """Resolve an airport code to (lat, lon, elevation_ft) via govt-data.
+@dataclass(frozen=True)
+class AirportFix:
+    """One resolved airport, enough to centre the scope on it.
+
+    `elev_ft` is the field elevation and `has_elevation` says whether it came
+    from the record or is a 0.0 stand-in. UIs subtract the centre elevation to
+    show AGL, so a silent 0.0 would quietly turn every AGL readout back into
+    MSL — the caller is told rather than left to guess.
+    """
+    ident: str
+    name: str
+    lat: float
+    lon: float
+    elev_ft: float
+    has_elevation: bool
+
+
+def lookup_airport(base_url: str, user: str, password: str, ident: str,
+                   timeout: float = 15.0) -> AirportFix:
+    """Resolve an airport code to an `AirportFix` via govt-data.
 
     `ident` may be an ICAO ('KAWO'), IATA, GPS/FAA local ('S43'), or
     OurAirports ident — govt-data's GET /airports/{ident} matches any of them.
 
-    Returns (lat, lon, elev_ft); elevation defaults to 0.0 if the record has
-    none. Raises AirportLookupError on 404 (unknown code), missing
-    coordinates, auth failure, or any network/parse error — the caller turns
-    that into a clean argparse error so a typo'd code fails fast at startup.
+    Raises AirportLookupError on 404 (unknown code), missing coordinates, auth
+    failure, or any network/parse error. Callers turn that into an argparse
+    error (a typo'd --airport fails fast at startup) or into a message back to
+    the web client that asked.
+
+    Returns a value rather than stashing the name on the function object: this
+    is now called from a thread pool serving concurrent web clients, and
+    function attributes are shared state two lookups would race over.
     """
     code = ident.strip().upper()
     if not code:
@@ -72,10 +93,13 @@ def resolve_airport(base_url: str, user: str, password: str, ident: str,
     if lat is None or lon is None:
         raise AirportLookupError(f'airport {code!r} has no coordinates in govt-data')
     elev = data.get('elevation_ft')
-    name = data.get('name') or code
-    resolve_airport.last_name = name  # let the caller print a friendly name
-    resolve_airport.last_ident = data.get('ident') or code
-    return float(lat), float(lon), float(elev) if elev is not None else 0.0
+    return AirportFix(
+        ident=str(data.get('ident') or code),
+        name=str(data.get('name') or code),
+        lat=float(lat), lon=float(lon),
+        elev_ft=float(elev) if elev is not None else 0.0,
+        has_elevation=elev is not None,
+    )
 
 
 def bucket_key(lat: float, lon: float) -> str:
@@ -176,6 +200,10 @@ class FacilitiesClient(threading.Thread):
         self.status = 'idle'
         self._fail_count = 0
         self._next_attempt_at = 0.0
+        # Nudged by wake() so a scope re-centre refetches immediately instead
+        # of leaving the new location with no airports for up to a minute.
+        # stop() sets it too, so shutdown stays prompt.
+        self._wake = threading.Event()
 
     # ---- public API ------------------------------------------------------
 
@@ -190,6 +218,16 @@ class FacilitiesClient(threading.Thread):
 
     def stop(self):
         self._stop.set()
+        self._wake.set()
+
+    def wake(self):
+        """Re-evaluate now rather than at the next poll.
+
+        Called when something moves the observer deliberately (a web client
+        picking an airport). The periodic drift check would get there anyway,
+        but a minute of an empty scope over the chosen airport reads as broken.
+        """
+        self._wake.set()
 
     # ---- thread loop -----------------------------------------------------
 
@@ -208,7 +246,8 @@ class FacilitiesClient(threading.Thread):
                 self._tick()
             except Exception as e:
                 self.status = f'error: {type(e).__name__}: {e}'
-            self._stop.wait(self.poll_interval_s)
+            self._wake.wait(self.poll_interval_s)
+            self._wake.clear()
 
     def _tick(self):
         if self._observer_provider is None:

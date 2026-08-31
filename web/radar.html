@@ -26,6 +26,7 @@
         }
 
         #status {
+            position: relative;   /* anchors the #center-msg toast */
             padding: 10px;
             background: #001100;
             border-bottom: 1px solid #0f0;
@@ -37,7 +38,7 @@
 
         #status .left, #status .right {
             display: flex;
-            gap: 20px;
+            gap: 14px;
             align-items: center;
         }
 
@@ -110,6 +111,89 @@
             font-size: 12px;
         }
 
+        /* Scope centre selector. Same CRT palette as the dropdowns so it
+           reads as one panel rather than a bolted-on web form. */
+        #center-input {
+            background: #001100;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 2px 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            width: 7ch;
+            text-transform: uppercase;
+        }
+
+        #center-input:focus {
+            outline: none;
+            box-shadow: 0 0 3px #0f0;
+        }
+
+        #center-input:disabled {
+            border-color: #050;
+            color: #060;
+            cursor: not-allowed;
+        }
+
+        #center-input::placeholder {
+            color: #060;
+        }
+
+        /* The readout flashes when the centre moves. On a shared instance
+           the move may have been another viewer's doing, so the scope
+           jumping needs something to point at. */
+        #observer-pos.flash {
+            color: #fff;
+            text-shadow: 0 0 6px #0f0;
+            transition: none;
+        }
+
+        /* A toast, not a bar item. It is visible for a few seconds; holding
+           permanent width in the status bar for it pushes the whole bar onto
+           a second row and steals scope height on every page forever. */
+        #center-msg {
+            position: absolute;
+            top: 100%;
+            left: 10px;
+            z-index: 5;
+            font-size: 12px;
+            background: #001100;
+            border: 1px solid #0f0;
+            padding: 3px 8px;
+            max-width: min(60ch, calc(100vw - 40px));
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.4s ease;
+        }
+
+        #center-msg.show { opacity: 1; }
+        #center-msg.error { color: #f55; border-color: #f55; }
+
+        /* The GPS light is a control, not just a lamp: clicking it hands the
+           centre to gpsd or takes it back. Three states, because "off" and
+           "there is no GPS here" are different facts and a user deciding
+           whether to click needs to tell them apart. */
+        .indicator.clickable {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .indicator.clickable:hover .indicator-light {
+            box-shadow: 0 0 5px #0f0;
+        }
+
+        .indicator.unavailable {
+            cursor: default;
+            opacity: 0.45;
+        }
+
+        .indicator.unavailable:hover .indicator-light {
+            box-shadow: none;
+        }
+
         #canvas-container {
             flex: 1;
             position: relative;
@@ -158,8 +242,16 @@
     <div id="container">
         <div id="status">
             <div class="left">
+                <span id="center-control" hidden>
+                    Center:
+                    <input type="text" id="center-input" placeholder="HOME"
+                           maxlength="10" autocomplete="off" autocorrect="off"
+                           autocapitalize="characters" spellcheck="false"
+                           title="Airport code (KPAE, S43, DEN) or HOME. Press Enter.">
+                </span>
                 <span id="observer-pos">Observer: --</span>
                 <span id="track-count">Tracks: 0</span>
+                <span id="center-msg"></span>
             </div>
             <div class="right">
                 <span>
@@ -221,7 +313,7 @@
                     <span class="indicator-light" id="uat-light"></span>
                     <span>978</span>
                 </span>
-                <span class="indicator">
+                <span class="indicator" id="gps-indicator">
                     <span class="indicator-light" id="gps-light"></span>
                     <span>GPS</span>
                 </span>

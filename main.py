@@ -9,7 +9,7 @@ import argparse
 
 import config
 import os
-from airports import FacilitiesClient, resolve_airport, AirportLookupError
+from airports import FacilitiesClient, lookup_airport, AirportLookupError
 from audio import AudioAlerter
 from cache import RegistryCache
 from engine import Engine
@@ -106,6 +106,12 @@ def main():
                    help='Center the radar on an airport instead of gpsd/--fixed-*. '
                         'Accepts ICAO, IATA, GPS, or FAA local codes (e.g. KAWO, '
                         'S43, DEN); resolved to lat/lon/elevation via govt-data.')
+    p.add_argument('--no-web-recenter', dest='web_recenter',
+                   action='store_false',
+                   help='Do not let web clients move the scope centre. The '
+                        'engine has ONE observer, so a client that re-centres '
+                        'moves it for every connected viewer — use this on a '
+                        'public instance. Curses and --airport are unaffected.')
     p.add_argument('--cache-path',    default=config.REGISTRY_CACHE_PATH,
                    help='On-disk JSON cache for FAA registry lookups.')
     p.add_argument('--cache-ttl-days', type=float,
@@ -268,21 +274,33 @@ def main():
         threading.Thread(target=bridge, daemon=True, name='fac-bridge').start()
         facilities.start()
 
+    # The startup centre is also HOME — the magic code the web UI offers to
+    # get back to whatever this instance was launched pointing at. Its
+    # elevation rides along because AGL readouts are centre-relative: HOME
+    # without its field elevation would report MSL and call it AGL.
     if args.airport:
         try:
-            lat, lon, elev_ft = resolve_airport(
+            fix = lookup_airport(
                 args.govt_data_url, config.GOVT_DATA_USER,
                 config.GOVT_DATA_PASS, args.airport)
         except AirportLookupError as e:
             p.error(f'--airport {args.airport!r}: {e}')
-        engine.update_observer(lat, lon, elev_ft, manual=True)
-        print(f'Radar centered on {resolve_airport.last_ident} '
-              f'({resolve_airport.last_name}): '
-              f'{lat:.5f}, {lon:.5f}, {elev_ft:.0f} ft')
+        engine.set_home(fix.lat, fix.lon, fix.elev_ft)
+        engine.set_center(fix.lat, fix.lon, fix.elev_ft, label=fix.ident)
+        print(f'Radar centered on {fix.ident} ({fix.name}): '
+              f'{fix.lat:.5f}, {fix.lon:.5f}, {fix.elev_ft:.0f} ft')
+        if not fix.has_elevation:
+            print(f'NOTE: {fix.ident} has no field elevation in govt-data; '
+                  f'AGL readings will equal MSL until you centre elsewhere.')
     elif args.fixed_lat is not None and args.fixed_lon is not None:
-        engine.update_observer(args.fixed_lat, args.fixed_lon,
-                               args.fixed_alt_ft, manual=True)
+        engine.set_home(args.fixed_lat, args.fixed_lon, args.fixed_alt_ft)
+        engine.set_center(args.fixed_lat, args.fixed_lon, args.fixed_alt_ft,
+                          label='HOME')
     else:
+        # Under gpsd there is no fixed HOME — the receiver's position *is*
+        # home — so no set_home() call. CenterControl reads that absence and
+        # makes 'HOME' mean "hand the centre back to GPS".
+        engine.set_gps_available(True)
         gps = GpsFeeder(engine, args.gpsd_host, args.gpsd_port,
                         recorder=recorder)
         gps.start()
@@ -347,11 +365,29 @@ def main():
             print("NOTE: --kml only affects the web UI (--web); the curses UI "
                   "does not draw overlays.")
 
+    # --- Web scope re-centring ------------------------------------------
+    # The resolver is injected so ui_web keeps knowing nothing about
+    # govt-data, the same reason the facilities bridge lives here. on_change
+    # nudges the facilities client so the newly chosen airport gets its
+    # airports/runways at once instead of at the next 60 s poll.
+    center_control = None
+    if args.web:
+        center_control = ui_web.CenterControl(
+            engine,
+            resolver=lambda code: lookup_airport(
+                args.govt_data_url, config.GOVT_DATA_USER,
+                config.GOVT_DATA_PASS, code),
+            on_change=(facilities.wake if facilities is not None else None),
+            allow=args.web_recenter,
+            error_cls=AirportLookupError)
+        if not args.web_recenter:
+            print('Web scope re-centring disabled (--no-web-recenter).')
+
     try:
         if args.web:
             ui_web.run(engine, args.refresh_hz, port=args.web_port,
                        http_port=args.http_port, overlay=overlay,
-                       viewer_gate=viewer_gate)
+                       viewer_gate=viewer_gate, center_control=center_control)
         else:
             ui_curses.run(engine, args.refresh_hz)
     finally:

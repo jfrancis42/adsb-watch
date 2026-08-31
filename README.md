@@ -82,6 +82,10 @@ python3 main.py --airport S43       # Harvey Field
 pins the observer there. It takes precedence over `--fixed-lat/-lon` and gpsd,
 and fails fast with a clear message if the code is unknown.
 
+Whichever of these you start with becomes **HOME** — the code the web UI's
+centre selector offers to get back to (see below). Its elevation comes along,
+so the AGL readout stays referenced to the ground at home.
+
 The auto-launcher tries `readsb`, `dump1090-fa`, `dump1090-mutability`,
 `dump1090` in that order. If port 30003 is already serving (e.g. systemd unit),
 it leaves it alone and just connects.
@@ -197,6 +201,33 @@ The web UI displays a circular radar scope with:
 - Aircraft labels showing altitude (ft), speed (mph), and type
 
 WebSocket server runs on port 8765, HTTP server on 8080 (override with `--web-port` / `--http-port`).
+
+#### Choosing the scope centre
+
+The status bar has a **Center** box: type an airport code (`KPAE`, `S43`,
+`DEN`) or the magic code `HOME` and press Enter, and the scope re-centres
+there. The centre carries the airport's field elevation, so the AGL altitude
+mode stays correct after a move; `HOME` carries `--fixed-alt-ft`.
+
+**GPS overrides manual selection.** On an instance with a gpsd feeder the GPS
+lamp is lit, the Center box is disabled, and a manual selection is refused —
+gpsd owns the centre and the next fix would overwrite anything you typed. Click
+the **GPS indicator** to switch it off, then choose; click it again to hand the
+centre back. Re-enabling GPS doesn't move the scope: it stays where it is until
+the next fix arrives. Instances started with `--fixed-lat`/`--airport` have no
+gpsd feeder, so their GPS lamp is dimmed and manual selection is always
+available.
+
+There is only one centre, and it is shared: re-centring moves the scope for
+every connected viewer. That is forced by the design — the internet feeders
+query a box around the observer and the airport data is fetched around it, so a
+client-side-only pan would show an empty scope over a place nothing was fetched
+for. Use **`--no-web-recenter`** on a public instance to turn the box off;
+`--airport` and the curses `o` key still work. Airports and runways at the new
+centre appear once the facilities refetch finishes (it starts immediately, but
+it is one request per airport in radius).
+
+Full detail, including the WebSocket control messages, in `WEB_UI.md`.
 
 #### KML/KMZ overlay
 
@@ -355,6 +386,7 @@ Most everything is overridable via flag or `$ENV`:
 | `--gpsd-port`         | `GPSD_PORT`        | `2947`                  |
 | `--fixed-lat/-lon/-alt-ft` | —             | skip gpsd, pin observer |
 | `--airport`           | —                  | center on airport code (ICAO/IATA/GPS/local) |
+| `--no-web-recenter`   | —                  | web clients may re-centre the scope |
 | `--govt-data-url`     | `GOVT_DATA_URL`    | `https://data.n0gq.org` |
 | `--cache-path`        | `ADSB_CACHE_PATH`  | `$XDG_CACHE_HOME/adsb-watch/registry.json` |
 | `--cache-ttl-days`    | `ADSB_CACHE_TTL_S` | 7 days                  |
