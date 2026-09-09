@@ -1,0 +1,40 @@
+# MANAGED BY ANSIBLE — ansible/templates/containers/adsb-web/default.conf.j2
+#
+# The allow-list is rendered from `lan_vhost_allow` in group_vars/all.yml, the
+# same variable dmz-vhosts.yml uses for the vhosts still on VMs. One source, so
+# adding a site LAN cannot fix the VMs and silently miss the containers.
+server {
+    listen 80;
+    server_name adsb.n0gq.org;
+
+{% for a in lan_vhost_allow %}
+    allow {{ a.cidr }};{% if a.why is defined %}   # {{ a.why }}{% endif %}
+
+{% endfor %}
+    deny  all;
+
+    # Kept from the VM's config: without it nginx builds redirects as absolute
+    # URLs using the listen port, which breaks behind the hub's TLS proxy.
+    absolute_redirect off;
+    client_max_body_size 32m;
+
+    access_log /var/log/nginx/adsb.access.log;
+    error_log  /var/log/nginx/adsb.error.log;
+
+    location /ws {
+        proxy_pass         http://127.0.0.1:8765/;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade    $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_set_header   Host       $host;
+        proxy_read_timeout 86400s;
+    }
+
+    location / {
+        proxy_pass       http://127.0.0.1:8086;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

@@ -1,0 +1,6 @@
+# nginx sidecar for adsb. Shares the adsb container's network namespace, so it
+# listens on :80 at 10.1.17.41 and proxies to the app on 127.0.0.1 -- the same
+# arrangement the VM had when both were processes on one box.
+FROM docker.io/library/nginx:1.27-alpine
+COPY default.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
