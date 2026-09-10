@@ -5,6 +5,23 @@
 # adding a site LAN cannot fix the VMs and silently miss the containers.
 server {
     listen 80;
+    # TLS ON THE CONTAINER ITSELF, not only on the hub. adsb.n0gq.org is
+    # split-horizon: on the LAN it resolves to this container (10.1.17.41),
+    # not to the hub, so the hub's certificate never enters the picture here.
+    # The hub sends HSTS with includeSubDomains for n0gq.org, and once a
+    # browser has seen that it will REFUSE to fall back to http for any
+    # *.n0gq.org name -- so a LAN vhost on :80 only becomes unreachable with
+    # no error a user can act on. That is exactly how illumio.n0gq.org and
+    # maps.n0gq.org each broke on 2026-09-09.
+    #
+    # One server block on both ports: plain http on the LAN keeps working for
+    # anything that wants it, and https works for everything else.
+    listen 443 ssl;
+    ssl_certificate     {{ lan_tls_dir }}/fullchain.pem;
+    ssl_certificate_key {{ lan_tls_dir }}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
     server_name adsb.n0gq.org;
 
 {% for a in lan_vhost_allow %}

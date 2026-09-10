@@ -1,6 +1,28 @@
 # nginx sidecar for adsb. Shares the adsb container's network namespace, so it
 # listens on :80 at 10.1.17.41 and proxies to the app on 127.0.0.1 -- the same
 # arrangement the VM had when both were processes on one box.
-FROM docker.io/library/nginx:1.27-alpine
+FROM docker.io/library/nginx:1.27
+# DEBIAN, NOT ALPINE, and that is about monitoring rather than nginx. The
+# sentry agent's package checks are Debian-specific -- debsums, apt-get -s and
+# /var/log/dpkg.log -- so on an Alpine base this container would sit in sentry
+# permanently degraded, which after a week is indistinguishable from a real
+# fault and trains you to ignore it. The official Debian and Alpine nginx
+# images are otherwise drop-in: same conf paths, same entrypoint.
+
+# `python3`, NOT `python3-minimal`: python3-minimal omits the standard library,
+# so the agent installs, is executable, and then dies on its own first import
+# with "ModuleNotFoundError: No module named 'json'". The import check below
+# fails the BUILD instead of leaving a container that silently never reports.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 debsums \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -c "import json, hashlib, subprocess"
+
+# The sentry agent, so this container reports to the collector as its own host.
+# Staged into the build context by ansible/containers.yml and run by
+# sentry-agent-containers.sh on the host -- a container has no sshd, so the
+# normal per-host timer cannot reach into it.
+COPY sentry-agent /usr/local/bin/sentry-agent
+
 COPY default.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80

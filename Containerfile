@@ -20,6 +20,20 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 COPY *.py ./
+# The sentry agent, so this container reports to the collector as its own
+# host. Staged into the build context by ansible/containers.yml and run by
+# sentry-agent-containers.sh on the host -- a container is not reachable by
+# SSH, so the normal per-host timer cannot deploy into it.
+COPY sentry-agent /usr/local/bin/sentry-agent
+
+# THE PRACTICE-AREA OVERLAY. main.py runs with --kml and --kml-file defaults
+# to this file beside main.py, so it is required data, not an extra. `COPY
+# *.py` above does not match it -- it is the only non-Python file in the tree
+# -- and without it the radar draws everything EXCEPT the orange practice
+# boxes, silently: a missing overlay file is indistinguishable from the
+# overlay being switched off.
+COPY COPA_v7_01-12-2026.kmz ./
+
 COPY web ./web
 
 # A REAL HOME, and it is load-bearing. config.py puts logs in
