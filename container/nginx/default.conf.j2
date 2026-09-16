@@ -47,6 +47,27 @@ server {
         proxy_read_timeout 86400s;
     }
 
+    # The UI assets must not be heuristically cached.
+    #
+    # ui_web.py's HTTP server sends Last-Modified and nothing else -- no
+    # Cache-Control, no ETag -- and a browser given only Last-Modified is
+    # free to invent its own freshness lifetime and serve a stale copy
+    # without asking. That is invisible and it is expensive: a deployed fix
+    # appears not to have worked, so the next thing changed is the code that
+    # was already correct.
+    #
+    # no-cache (not no-store) still allows a conditional request, so an
+    # unchanged file is a 304 and costs nothing. The 10 MB opening snapshot
+    # over the WebSocket dwarfs these files anyway.
+    location ~* \.(html|js|css)$ {
+        proxy_pass       http://127.0.0.1:8086;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        add_header Cache-Control "no-cache, must-revalidate" always;
+    }
+
     location / {
         proxy_pass       http://127.0.0.1:8086;
         proxy_set_header Host              $host;

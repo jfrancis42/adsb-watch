@@ -10,6 +10,24 @@ const HIGHLIGHT_COLOR = '#00ff00';
 const TRAIL_COLOR = '#006600';
 // KML overlay drawn in amber so practice-area boundaries/labels read as a
 // distinct layer from the green aircraft, trails, and airports.
+// VFR charts are printed on cream/tan paper and are deliberately high-contrast
+// in their OWN palette, so green phosphor and amber airspace laid over them
+// disappear -- reported as "might as well not even be there". Two corrections,
+// applied to the VFR view only:
+//
+//   SCRIM  dims the chart toward the dark basemap, where the same green was
+//          already legible. It dims rather than desaturates, so every chart
+//          colour keeps its meaning -- a magenta airway is still magenta.
+//   HALO   a dark outline behind every stroke and glyph, so the symbology
+//          stays readable even over the palest parts of the chart, and does
+//          not depend on the scrim alone.
+//
+// Both are VFR-only: the dark vector basemap needs neither, and adding them
+// there would dim a map the user already finds correct.
+const VFR_SCRIM = 0.45;   // 0 = raw chart, 1 = black. Tune here.
+const VFR_HALO = 'rgba(0, 0, 0, 0.95)';
+const VFR_HALO_BLUR = 4;
+
 const OVERLAY_COLOR = '#ffb000';
 const OVERLAY_FILL = 'rgba(255, 176, 0, 0.06)';
 const OVERLAY_LINE = 'rgba(255, 176, 0, 0.8)';
@@ -32,6 +50,14 @@ class RadarDisplay {
         this.facilities = null;
         this.overlay = null;  // Static KML overlay (polygons/lines/points), sent once on connect
         this.rangeNM = 5.0;
+
+        // View mode: 'radar' (unchanged, the default), 'map' or 'vfr'.
+        // RADAR must stay byte-for-byte what it was, so every map behaviour
+        // below is gated on this rather than replacing existing code paths.
+        this.viewMode = 'radar';
+        this.mapLayer = document.getElementById('map-layer');
+        this.map = null;             // the MapLibre instance, once loaded
+        this.mapLibsPromise = null;  // libs are fetched on FIRST map use only
         this.trailSeconds = 30.0;
         this.projectionSeconds = 60.0;
         this.alertRangeNM = 1.0;
@@ -71,12 +97,27 @@ class RadarDisplay {
 
         // Canvas dimensions (must be after fadeCanvas creation)
         this.resize();
-        window.addEventListener('resize', () => this.resize());
+        window.addEventListener('resize', () => { this.resize(); this.updateMapView(); });
+
+        const viewSel = document.getElementById('view-select');
+        if (viewSel) {
+            viewSel.addEventListener('change', (e) => this.setViewMode(e.target.value));
+            // ?view=map | vfr | radar -- so a view can be bookmarked, and so
+            // the map path can be exercised without a human clicking a menu.
+            // Anything unrecognised is ignored and RADAR stands, which is the
+            // documented default.
+            const want = new URLSearchParams(window.location.search).get('view');
+            if (want && ['radar', 'map', 'vfr'].includes(want.toLowerCase())) {
+                viewSel.value = want.toLowerCase();
+                this.setViewMode(viewSel.value);
+            }
+        }
 
         // Setup control event listeners
         document.getElementById('range-select').addEventListener('change', (e) => {
             this.rangeNM = parseFloat(e.target.value);
             this.resize();  // Recalculate pixels per NM
+            this.updateMapView();   // the map's zoom IS the range ring
         });
 
         document.getElementById('trail-select').addEventListener('change', (e) => {
@@ -362,7 +403,17 @@ class RadarDisplay {
                 this.suppressAlertsUntil = Date.now() + 3000;
             }
         }
+        const hadObserver = this.observer;
         this.observer = data.observer;
+        // Whether the map needs to follow (a re-centre: GPS drift, a manual
+        // centre, or the very first fix). ACTED ON AT THE END of this method,
+        // not here -- see the note there. Recorded now, before this.observer
+        // is used further down, purely so the comparison is against the old
+        // value.
+        const observerMoved = !hadObserver || !this.observer
+            || hadObserver.lat !== this.observer.lat
+            || hadObserver.lon !== this.observer.lon;
+
         this.tracks = data.tracks;
 
         // Re-attach registry metadata the server sent once and now omits.
@@ -417,11 +468,27 @@ class RadarDisplay {
         // Absent on a delta frame -- keep what we have; only replace when sent.
         if (data.facilities !== undefined) this.facilities = data.facilities;
 
-        // Check for sound trigger events
-        this.checkSoundTriggers();
+        // ORDER AND ISOLATION HERE ARE DELIBERATE.
+        //
+        // The readout is INFORMATION -- where you are, how many aircraft, how
+        // many airports. Sound is decoration, and the audio path is the most
+        // failure-prone thing on this page: a browser can refuse an
+        // AudioContext outright when it has seen no user gesture. Running it
+        // first meant one throw in the audio code took the readout with it,
+        // and the failure was invisible in the obvious place: aircraft kept
+        // drawing (this.tracks was already assigned above, and the render
+        // loop is a separate call), so the display looked alive while the
+        // position and counts silently stopped updating.
+        //
+        // So: the centre name first (the readout needs it), then the readout,
+        // then everything optional -- each isolated, so no decoration can
+        // take out the information again.
+        try {
+            this.updateCenterControls(data.center);
+        } catch (err) {
+            console.error('centre controls:', err);
+        }
 
-        // Update status bar
-        this.updateCenterControls(data.center);
         if (this.observer) {
             // One readout, not two: the centre's name and its coordinates are
             // the same fact, and the status bar has no width to spare.
@@ -432,6 +499,30 @@ class RadarDisplay {
 
         const airportCount = this.facilities?.airports?.length || 0;
         document.getElementById('track-count').textContent = `Tracks: ${this.tracks.length} | Airports: ${airportCount}`;
+
+        // Decoration, after the information and unable to harm it.
+        try {
+            this.checkSoundTriggers();
+        } catch (err) {
+            console.error('sound triggers:', err);
+        }
+
+        // Re-centre the map LAST, and in its own try/catch.
+        //
+        // This is the whole readout bug. It used to run near the TOP of this
+        // method, before this.tracks was even assigned -- so any throw inside
+        // it (MapLibre rejecting a jumpTo, a resize before the GL context is
+        // ready) aborted the entire snapshot handler: no tracks, no readout,
+        // and the display froze on its last good frame while looking alive.
+        // The map is a view of the data; it must never be able to stop the
+        // data being read.
+        if (observerMoved) {
+            try {
+                this.updateMapView();
+            } catch (err) {
+                console.error('map view update:', err);
+            }
+        }
 
         // Update indicator lights
         const adsbLight = document.getElementById('adsb-light');
@@ -525,15 +616,49 @@ class RadarDisplay {
     }
 
     render(dt) {
-        // Phosphor persistence effect: fade the previous frame
-        this.ctx.drawImage(this.fadeCanvas, 0, 0);
-        this.fadeCtx.fillStyle = 'rgba(0, 0, 0, 0.08)';  // Fade rate
-        this.fadeCtx.fillRect(0, 0, this.fadeCanvas.width, this.fadeCanvas.height);
-        this.fadeCtx.drawImage(this.canvas, 0, 0);
+        const overMap = this.viewMode !== 'radar';
 
-        // Clear current frame
-        this.ctx.fillStyle = BACKGROUND;
-        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        // PHOSPHOR PERSISTENCE IS RADAR-ONLY, and that is not an aesthetic
+        // choice. The effect works by compositing the previous frame through
+        // a semi-opaque BLACK fill; over a map those black pixels accumulate
+        // as a haze that dims the tiles a little more every frame until the
+        // map is gone. Trails are drawn explicitly from `this.history` either
+        // way, so what is lost over a map is the glow, not the information.
+        if (!overMap) {
+            // Phosphor persistence effect: fade the previous frame
+            this.ctx.drawImage(this.fadeCanvas, 0, 0);
+            this.fadeCtx.fillStyle = 'rgba(0, 0, 0, 0.08)';  // Fade rate
+            this.fadeCtx.fillRect(0, 0, this.fadeCanvas.width, this.fadeCanvas.height);
+            this.fadeCtx.drawImage(this.canvas, 0, 0);
+
+            // Clear current frame
+            this.ctx.fillStyle = BACKGROUND;
+            this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        } else {
+            // Transparent, so the map shows through. An opaque fill here is
+            // what hides it -- the map element is behind the canvas, not
+            // inside it.
+            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+            if (this.viewMode === 'vfr') {
+                // Dim the chart toward the dark basemap. Covering the whole
+                // canvas is fine: outside the clipped disc there is nothing
+                // but black already.
+                this.ctx.fillStyle = `rgba(0, 0, 0, ${VFR_SCRIM})`;
+                this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+            }
+        }
+
+        // The halo. Set once, here, so it applies to the grid, the overlay,
+        // the airports, the trails and the aircraft without touching any of
+        // their drawing code -- and is inherited through their own
+        // save()/restore() pairs.
+        if (this.viewMode === 'vfr') {
+            this.ctx.shadowColor = VFR_HALO;
+            this.ctx.shadowBlur = VFR_HALO_BLUR;
+        } else {
+            this.ctx.shadowColor = 'transparent';
+            this.ctx.shadowBlur = 0;
+        }
 
         // Draw persistent grid and labels (drawn every frame, not faded)
         this.drawGrid();
@@ -569,6 +694,171 @@ class RadarDisplay {
         }
 
         this.ctx.restore();
+    }
+
+    // ── map views ────────────────────────────────────────────────────────
+    //
+    // RADAR is unchanged and costs nothing: none of this runs, and not one
+    // byte is fetched from maps.n0gq.org, until a map view is selected.
+
+    // The tile server. Same origin for the libraries and the archives, and it
+    // sends Access-Control-Allow-Origin:* so this works from localhost:8080.
+    static MAPS_BASE = 'https://maps.n0gq.org';
+
+    ensureMapLibs() {
+        // Loaded ONCE, lazily, and in this exact order -- each depends on the
+        // one before it. Loading them in parallel appears to work and then
+        // fails intermittently, because pmtiles.js registers itself against a
+        // maplibregl that may not exist yet.
+        if (this.mapLibsPromise) return this.mapLibsPromise;
+        const base = RadarDisplay.MAPS_BASE + '/lib';
+        const css = document.createElement('link');
+        css.rel = 'stylesheet';
+        css.href = base + '/maplibre-gl.css';
+        document.head.appendChild(css);
+        const load = (src) => new Promise((resolve, reject) => {
+            const el = document.createElement('script');
+            el.src = src;
+            el.onload = resolve;
+            el.onerror = () => reject(new Error('could not load ' + src));
+            document.head.appendChild(el);
+        });
+        this.mapLibsPromise = load(base + '/maplibre-gl.js')
+            .then(() => load(base + '/pmtiles.js'))
+            .then(() => load(base + '/protomaps-themes-base.js'))
+            .then(() => {
+                const proto = new pmtiles.Protocol();
+                maplibregl.addProtocol('pmtiles', proto.tile.bind(proto));
+            });
+        return this.mapLibsPromise;
+    }
+
+    setViewMode(mode) {
+        this.viewMode = mode;
+        // The fade buffer is not written while a map view is up, so without
+        // this the first frame back on RADAR composites a stale snapshot of
+        // whatever was on screen when the map was selected.
+        this.fadeCtx.clearRect(0, 0, this.fadeCanvas.width, this.fadeCanvas.height);
+        if (mode === 'radar') {
+            this.mapLayer.classList.remove('active');
+            return;
+        }
+        this.mapLayer.classList.add('active');
+        this.ensureMapLibs()
+            .then(() => this.buildMap(mode))
+            .catch((err) => {
+                // Fall back rather than show a dead black disc: the radar is
+                // the job, the map is decoration, and a tile server that is
+                // unreachable (no VPN, no internet) must not cost the display.
+                console.error('map unavailable:', err);
+                this.viewMode = 'radar';
+                this.mapLayer.classList.remove('active');
+                const sel = document.getElementById('view-select');
+                if (sel) sel.value = 'radar';
+            });
+    }
+
+    buildMap(mode) {
+        const base = RadarDisplay.MAPS_BASE;
+        // Rebuilt on a mode change rather than restyled: MAP is a VECTOR
+        // source and VFR is two RASTER ones, so the sources differ, not just
+        // the paint.
+        if (this.map) { this.map.remove(); this.map = null; }
+
+        const style = {
+            version: 8,
+            glyphs: base + '/basemaps-assets/fonts/{fontstack}/{range}.pbf',
+            sprite: base + '/basemaps-assets/sprites/v4/dark',
+            sources: {},
+            layers: [],
+        };
+
+        if (mode === 'vfr') {
+            // FAA sectionals, with the Terminal Area charts above them where
+            // they exist -- TAC is transparent outside its metro footprint, so
+            // it refines the busy areas and hides nothing elsewhere.
+            //
+            // No `maxzoom` on either source, deliberately: MapLibre over-zooms
+            // a raster past its deepest level by scaling the last tile, so the
+            // chart stays usable at ranges tighter than the FAA scanned.
+            // Setting maxzoom would make it VANISH there instead, which at
+            // 1 NM range is precisely when it is wanted.
+            style.sources.sec = { type: 'raster', url: 'pmtiles://' + base + '/sec.pmtiles',
+                                  attribution: 'VFR charts © FAA' };
+            style.sources.tac = { type: 'raster', url: 'pmtiles://' + base + '/tac.pmtiles' };
+            style.layers = [
+                { id: 'sec', type: 'raster', source: 'sec' },
+                { id: 'tac', type: 'raster', source: 'tac' },
+            ];
+        } else {
+            style.sources.protomaps = {
+                type: 'vector',
+                url: 'pmtiles://' + base + '/usa.pmtiles',
+                attribution: '© OpenStreetMap',
+            };
+            // Dark, not light: this sits under a green phosphor scope, and a
+            // white basemap makes every aircraft and range ring unreadable.
+            style.layers = protomaps_themes_base.default('protomaps', 'dark');
+        }
+
+        this.map = new maplibregl.Map({
+            container: this.mapLayer,
+            style: style,
+            center: this.observer ? [this.observer.lon, this.observer.lat] : [-98, 38],
+            zoom: 8,
+            interactive: false,     // slaved to the radar; see the CSS note
+            attributionControl: false,
+            fadeDuration: 0,        // no cross-fade while the scope is live
+        });
+        // MapLibre does NOT throw and does not log: a source that fails to
+        // load arrives as an 'error' EVENT, so without this listener a broken
+        // tile source is a silent black disc and the browser console is clean.
+        this.map.on('error', (e) => {
+            console.error('map error:', e && e.error ? e.error.message : e);
+        });
+
+        this.updateMapView();
+    }
+
+    // Size, position and zoom the map so its edge IS the outermost range ring.
+    updateMapView() {
+        if (!this.map || this.viewMode === 'radar') return;
+
+        // The clipped disc: a square of 2r centred on the scope centre.
+        const d = this.radius * 2;
+        this.mapLayer.style.width = d + 'px';
+        this.mapLayer.style.height = d + 'px';
+        this.mapLayer.style.left = (this.cx - this.radius) + 'px';
+        this.mapLayer.style.top = (this.cy - this.radius) + 'px';
+
+        if (this.observer) {
+            // Web Mercator ground resolution at this latitude:
+            //     m/px = 156543.034 * cos(lat) / 2^zoom
+            // We need the scope's outer ring (this.radius px) to be exactly
+            // rangeNM, so solve for zoom. MapLibre takes fractional zoom, so
+            // this is exact rather than rounded to the nearest tile level --
+            // which matters, because a rounded zoom would put the aircraft
+            // symbols in the wrong place relative to the terrain under them.
+            const metresPerPx = (this.rangeNM * 1852.0) / this.radius;
+            const latRad = this.observer.lat * Math.PI / 180.0;
+            // THE -1 IS NOT A FUDGE. The classic Web Mercator resolution
+            // formula, 156543.034 * cos(lat) / 2^z, is defined for 256 px
+            // tiles -- but MapLibre GL defines its zoom against 512 px tiles,
+            // so MapLibre zoom z has the ground resolution of standard zoom
+            // z+1. Without the correction the map renders at EXACTLY twice
+            // the radar's scale: measured 2.0041, 2.0036, 2.0039, 2.0048 and
+            // 2.0024 at five offsets, which is the sort of error that looks
+            // like plausible terrain on a basemap and is only obvious when
+            // something with known geometry -- a runway on a VFR chart --
+            // fails to line up.
+            const zoom = Math.log2(156543.03392804097 * Math.cos(latRad)
+                                   / metresPerPx) - 1;
+            this.map.jumpTo({
+                center: [this.observer.lon, this.observer.lat],
+                zoom: Math.max(0, Math.min(24, zoom)),
+            });
+        }
+        this.map.resize();
     }
 
     drawGrid() {

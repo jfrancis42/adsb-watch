@@ -200,10 +200,59 @@
             background: #000;
         }
 
+        /* The map, when a map view is selected. It sits BEHIND the canvas and
+           is clipped to a circle whose radius is the radar's outermost ring --
+           square box + border-radius:50%, which is cheaper and sharper than
+           clipping the canvas itself every frame.
+
+           pointer-events:none because the map is SLAVED to the radar: its
+           centre is the observer and its zoom is derived from the range ring.
+           A user drag would silently desynchronise the two, and the aircraft
+           would then be drawn in the wrong place over the map. */
+        #map-layer {
+            position: absolute;
+            display: none;
+            border-radius: 50%;
+            overflow: hidden;
+            pointer-events: none;
+            background: #000;
+        }
+        #map-layer.active { display: block; }
+
         canvas {
             width: 100%;
             height: 100%;
             display: block;
+            position: relative;   /* above #map-layer */
+        }
+
+        /* Position, tracks and airport count, bottom right over the scope.
+           Moved out of the top bar because adding the View selector pushed
+           that line into a second row, and a wrapped toolbar costs more
+           vertical space than the scope can spare.
+
+           The panel carries its own dark backing: it now sits over the map
+           and the VFR chart, and green-on-cream is exactly the contrast
+           problem the scope symbology already had. pointer-events:none so it
+           never swallows a click meant for the scope. */
+        #readout {
+            position: absolute;
+            right: 10px;
+            bottom: 8px;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 2px;
+            padding: 5px 8px;
+            border-radius: 3px;
+            background: rgba(0, 0, 0, 0.72);
+            color: #00ff00;
+            font-size: 12px;
+            line-height: 1.35;
+            white-space: nowrap;
+            text-align: right;
+            pointer-events: none;
+            z-index: 3;
         }
 
         .disconnected {
@@ -249,11 +298,17 @@
                            autocapitalize="characters" spellcheck="false"
                            title="Airport code (KPAE, S43, DEN) or HOME. Press Enter.">
                 </span>
-                <span id="observer-pos">Observer: --</span>
-                <span id="track-count">Tracks: 0</span>
                 <span id="center-msg"></span>
             </div>
             <div class="right">
+                <span>
+                    View:
+                    <select id="view-select">
+                        <option value="radar" selected>RADAR</option>
+                        <option value="map">MAP</option>
+                        <option value="vfr">VFR</option>
+                    </select>
+                </span>
                 <span>
                     Range:
                     <select id="range-select">
@@ -329,7 +384,12 @@
             </div>
         </div>
         <div id="canvas-container">
+            <div id="map-layer"></div>
             <canvas id="radar"></canvas>
+            <div id="readout">
+                <span id="observer-pos">Observer: --</span>
+                <span id="track-count">Tracks: 0</span>
+            </div>
         </div>
     </div>
 
