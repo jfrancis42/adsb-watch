@@ -28,6 +28,14 @@ const VFR_SCRIM = 0.45;   // 0 = raw chart, 1 = black. Tune here.
 const VFR_HALO = 'rgba(0, 0, 0, 0.95)';
 const VFR_HALO_BLUR = 4;
 
+// Aircraft data labels over MAP/VFR. #00ff00 is already the most saturated
+// green a screen has, so "brighter" means more LUMINOUS: mix in white, and
+// outline each glyph in near-black so it reads on the cream VFR chart and on
+// the grey basemap alike. RADAR keeps the plain phosphor green.
+const MAP_LABEL_COLOR = '#70ff70';
+const MAP_LABEL_OUTLINE = 'rgba(0, 0, 0, 0.9)';
+const LABEL_FONT_PX = 13;   // was 10; line spacing follows it
+
 const OVERLAY_COLOR = '#ffb000';
 const OVERLAY_FILL = 'rgba(255, 176, 0, 0.06)';
 const OVERLAY_LINE = 'rgba(255, 176, 0, 0.8)';
@@ -1140,24 +1148,33 @@ class RadarDisplay {
 
         const label = `${alt}' ${speed}mph\n${type}`;
 
-        ctx.fillStyle = TEXT_COLOR;
-        ctx.font = '10px "Courier New"';
+        const overMap = this.viewMode !== 'radar';
+        ctx.fillStyle = overMap ? MAP_LABEL_COLOR : TEXT_COLOR;
+        ctx.font = `${overMap ? 'bold ' : ''}${LABEL_FONT_PX}px "Courier New"`;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = MAP_LABEL_OUTLINE;
+        // Outline first, fill over it, so the stroke only shows as a rim.
+        const text = (str, x, y) => {
+            if (overMap) ctx.strokeText(str, x, y);
+            ctx.fillText(str, x, y);
+        };
 
         const lines = label.split('\n');
-        const lineHeight = 12;
+        const lineHeight = Math.round(LABEL_FONT_PX * 1.2);
         const xOffset = 15;
         const yOffset = -lines.length * lineHeight / 2;
 
         for (let i = 0; i < lines.length; i++) {
-            ctx.fillText(lines[i], xOffset, yOffset + i * lineHeight);
+            text(lines[i], xOffset, yOffset + i * lineHeight);
         }
 
         // Callsign above if available
         if (track.callsign) {
             ctx.textBaseline = 'bottom';
-            ctx.fillText(track.callsign, xOffset, -15);
+            text(track.callsign, xOffset, yOffset - 2);
         }
 
         ctx.restore();
