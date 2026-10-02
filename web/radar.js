@@ -190,6 +190,32 @@ class RadarDisplay {
         this.cy = this.canvas.height / 2;
         this.radius = Math.min(this.cx, this.cy) * 0.9;
         this.pixelsPerNM = this.radius / this.rangeNM;
+        this.reportCoverage();
+    }
+
+    // How far (NM) this window can see. On RADAR that is the outer ring; over
+    // a map the display runs to the window corners, so it is the half
+    // diagonal. The server fetches aircraft and airports out to the widest
+    // viewer's figure (capped), so the corners are not an empty map.
+    coverageNM() {
+        if (!this.pixelsPerNM) return this.rangeNM;
+        if (this.viewMode === 'radar') return this.rangeNM;
+        return Math.hypot(this.cx, this.cy) / this.pixelsPerNM;
+    }
+
+    // Debounced: a window drag fires dozens of resize events. `force` resends
+    // after a reconnect, when the server has forgotten this client's figure.
+    reportCoverage(force = false) {
+        clearTimeout(this._coverageTimer);
+        this._coverageTimer = setTimeout(() => {
+            const nm = Math.ceil(this.coverageNM());
+            if (!force && nm === this._coverageSent) return;
+            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+            try {
+                this.ws.send(JSON.stringify({ cmd: 'set_coverage', radius_nm: nm }));
+                this._coverageSent = nm;
+            } catch (e) { /* next change or reconnect resends */ }
+        }, force ? 0 : 250);
     }
 
     connect() {
@@ -198,6 +224,7 @@ class RadarDisplay {
 
         this.ws.onopen = () => {
             console.log('WebSocket connected');
+            this.reportCoverage(true);
             // Connection status is now shown via indicator lights
         };
 
@@ -640,9 +667,8 @@ class RadarDisplay {
             // inside it.
             this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
             if (this.viewMode === 'vfr') {
-                // Dim the chart toward the dark basemap. Covering the whole
-                // canvas is fine: outside the clipped disc there is nothing
-                // but black already.
+                // Dim the chart toward the dark basemap -- the whole canvas,
+                // because the chart now fills it rather than just the disc.
                 this.ctx.fillStyle = `rgba(0, 0, 0, ${VFR_SCRIM})`;
                 this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
             }
@@ -735,6 +761,7 @@ class RadarDisplay {
 
     setViewMode(mode) {
         this.viewMode = mode;
+        this.reportCoverage();
         // The fade buffer is not written while a map view is up, so without
         // this the first frame back on RADAR composites a stale snapshot of
         // whatever was on screen when the map was selected.
@@ -752,6 +779,7 @@ class RadarDisplay {
                 // unreachable (no VPN, no internet) must not cost the display.
                 console.error('map unavailable:', err);
                 this.viewMode = 'radar';
+                this.reportCoverage();
                 this.mapLayer.classList.remove('active');
                 const sel = document.getElementById('view-select');
                 if (sel) sel.value = 'radar';
@@ -820,16 +848,13 @@ class RadarDisplay {
         this.updateMapView();
     }
 
-    // Size, position and zoom the map so its edge IS the outermost range ring.
+    // Centre and zoom the map so the outermost range ring lands on rangeNM.
     updateMapView() {
         if (!this.map || this.viewMode === 'radar') return;
 
-        // The clipped disc: a square of 2r centred on the scope centre.
-        const d = this.radius * 2;
-        this.mapLayer.style.width = d + 'px';
-        this.mapLayer.style.height = d + 'px';
-        this.mapLayer.style.left = (this.cx - this.radius) + 'px';
-        this.mapLayer.style.top = (this.cy - this.radius) + 'px';
+        // The map layer fills the canvas container (CSS inset:0), and the
+        // canvas fills the same box, so the map's centre IS (cx, cy). Only
+        // the zoom has to be set from the ring.
 
         if (this.observer) {
             // Web Mercator ground resolution at this latitude:
@@ -936,6 +961,19 @@ class RadarDisplay {
         ctx.restore();
     }
 
+    // Is a scope-relative point (origin at cx, cy) drawable? On RADAR the
+    // scope IS the ring, so anything past it is off the display. On MAP/VFR
+    // the map fills the whole window, so the bound is the canvas rectangle
+    // (plus a margin, so a symbol or label straddling the edge is drawn
+    // partly rather than popping in and out whole).
+    inView(pos, margin = 0) {
+        if (this.viewMode === 'radar') {
+            return Math.sqrt(pos.x * pos.x + pos.y * pos.y) <= this.radius + margin;
+        }
+        const m = margin + 40;
+        return Math.abs(pos.x) <= this.cx + m && Math.abs(pos.y) <= this.cy + m;
+    }
+
     latLonToXY(lat, lon) {
         if (!this.observer) return null;
 
@@ -980,8 +1018,7 @@ class RadarDisplay {
             if (!pos) continue;
 
             // Skip if out of range
-            const dist = Math.sqrt(pos.x * pos.x + pos.y * pos.y);
-            if (dist > this.radius) continue;
+            if (!this.inView(pos)) continue;
 
             if (first) {
                 ctx.moveTo(pos.x, pos.y);
@@ -1001,8 +1038,7 @@ class RadarDisplay {
         if (!pos) return;
 
         // Skip if out of range
-        const dist = Math.sqrt(pos.x * pos.x + pos.y * pos.y);
-        if (dist > this.radius) return;
+        if (!this.inView(pos)) return;
 
         const ctx = this.ctx;
 
@@ -1015,11 +1051,10 @@ class RadarDisplay {
             let projX = pos.x + Math.sin(courseRad) * distancePx;
             let projY = pos.y - Math.cos(courseRad) * distancePx;
 
-            // Clip projection line to radar edge
-            const projDist = Math.sqrt(projX * projX + projY * projY);
-            const showDot = projDist <= this.radius;
-            if (projDist > this.radius) {
-                // Clip to radar circle along the line direction
+            // Clip projection line to radar edge (RADAR only -- over a map
+            // the canvas edge does the clipping)
+            const showDot = this.inView({ x: projX, y: projY });
+            if (!showDot) {
                 const clipped = this.clipLineToCircle(pos.x, pos.y, projX, projY);
                 projX = clipped.x;
                 projY = clipped.y;
@@ -1131,6 +1166,9 @@ class RadarDisplay {
     // Clip a line segment to the radar circle
     // Returns the clipped endpoint if the line extends beyond the circle
     clipLineToCircle(startX, startY, endX, endY) {
+        // Over a map nothing is bounded by the ring; the canvas clips.
+        if (this.viewMode !== 'radar') return { x: endX, y: endY };
+
         // Check if endpoint is outside radar
         const endDist = Math.sqrt(endX * endX + endY * endY);
         if (endDist <= this.radius) {
@@ -1211,10 +1249,12 @@ class RadarDisplay {
         ctx.save();
 
         // Clip everything to the radar circle so boundaries/labels don't spill
-        // past the scope edge.
-        ctx.beginPath();
-        ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
-        ctx.clip();
+        // past the scope edge -- RADAR only; over a map they fill the window.
+        if (this.viewMode === 'radar') {
+            ctx.beginPath();
+            ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+            ctx.clip();
+        }
 
         // Polygons — outlined + faintly filled.
         for (const poly of overlay.polygons || []) {
@@ -1259,8 +1299,7 @@ class RadarDisplay {
         for (const pt of overlay.points || []) {
             const pos = this.latLonToXY(pt.lat, pt.lon);
             if (!pos) continue;
-            const dist = Math.sqrt(pos.x * pos.x + pos.y * pos.y);
-            if (dist > this.radius) continue;
+            if (!this.inView(pos)) continue;
             if (pt.name) ctx.fillText(pt.name, pos.x, pos.y);
         }
 
@@ -1285,9 +1324,7 @@ class RadarDisplay {
             if (!lePos || !hePos) continue;
 
             // Check if runway is within radar range
-            const leDist = Math.sqrt(lePos.x * lePos.x + lePos.y * lePos.y);
-            const heDist = Math.sqrt(hePos.x * hePos.x + hePos.y * hePos.y);
-            if (leDist > this.radius && heDist > this.radius) continue;
+            if (!this.inView(lePos) && !this.inView(hePos)) continue;
 
             // Draw runway outline
             const widthNM = (runway.width_ft || 100) / 6076.12;  // Convert feet to NM
@@ -1311,8 +1348,7 @@ class RadarDisplay {
                 let endY = lePos.y - extendY;
 
                 // Clip to radar edge along the line direction
-                const endDist = Math.sqrt(endX * endX + endY * endY);
-                if (endDist > this.radius) {
+                if (!this.inView({ x: endX, y: endY })) {
                     const clipped = this.clipLineToCircle(lePos.x, lePos.y, endX, endY);
                     endX = clipped.x;
                     endY = clipped.y;
@@ -1340,8 +1376,7 @@ class RadarDisplay {
                 let endY = hePos.y - extendY;
 
                 // Clip to radar edge along the line direction
-                const endDist = Math.sqrt(endX * endX + endY * endY);
-                if (endDist > this.radius) {
+                if (!this.inView({ x: endX, y: endY })) {
                     const clipped = this.clipLineToCircle(hePos.x, hePos.y, endX, endY);
                     endX = clipped.x;
                     endY = clipped.y;
@@ -1391,8 +1426,7 @@ class RadarDisplay {
         // Draw airport marker (small circle at airport reference point)
         const airportPos = this.latLonToXY(airport.lat, airport.lon);
         if (airportPos) {
-            const dist = Math.sqrt(airportPos.x * airportPos.x + airportPos.y * airportPos.y);
-            if (dist <= this.radius) {
+            if (this.inView(airportPos)) {
                 ctx.save();
                 ctx.translate(airportPos.x, airportPos.y);
                 ctx.strokeStyle = PHOSPHOR_GREEN;

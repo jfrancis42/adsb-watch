@@ -197,6 +197,7 @@ class FacilitiesClient(threading.Thread):
         self._lock = threading.Lock()
         self._snapshot: Optional[Facilities] = None
         self._observer_provider = None  # callable -> (lat, lon) or None
+        self._radius_provider = None    # callable -> NM the viewers can see
         self.status = 'idle'
         self._fail_count = 0
         self._next_attempt_at = 0.0
@@ -211,6 +212,26 @@ class FacilitiesClient(threading.Thread):
         """`provider` is a callable that returns (lat, lon) or None — usually
         the engine's snapshot.observer accessor."""
         self._observer_provider = provider
+
+    def attach_radius(self, provider):
+        """`provider` returns the radius (NM) viewers can currently see --
+        ui_web.Coverage.radius_nm. The fetch radius is the larger of that and
+        `radius_nm`, so without a provider nothing changes."""
+        self._radius_provider = provider
+
+    # Fetch radii are rounded UP to this step. The cache is keyed by radius,
+    # so without it every window size would be its own cache row and its own
+    # few-hundred-request refetch.
+    RADIUS_STEP_NM = 25.0
+
+    def wanted_radius(self) -> float:
+        r = self.radius_nm
+        if self._radius_provider is not None:
+            try:
+                r = max(r, float(self._radius_provider()))
+            except Exception:
+                pass
+        return math.ceil(r / self.RADIUS_STEP_NM) * self.RADIUS_STEP_NM
 
     def snapshot(self) -> Optional[Facilities]:
         with self._lock:
@@ -260,11 +281,15 @@ class FacilitiesClient(threading.Thread):
         lat, lon = pos
 
         snap = self.snapshot()
-        # Refetch if we've never fetched, drifted, or exceeded TTL.
+        radius = self.wanted_radius()
+        # Refetch if we've never fetched, drifted, exceeded TTL, or viewers
+        # now see further than the last fetch reached. A SMALLER need does
+        # not refetch: the set we hold is a superset.
         if snap is not None:
             drift = _haversine_nm(snap.center_lat, snap.center_lon, lat, lon)
             fresh = (time.time() - snap.fetched_at) < self.ttl_s
-            if drift < self.move_threshold_nm and fresh:
+            covers = snap.radius_nm >= radius
+            if drift < self.move_threshold_nm and fresh and covers:
                 self.status = (f'fresh ({len(snap.airports)} airports, '
                                f'drift {drift:.1f} NM)')
                 return
@@ -277,7 +302,7 @@ class FacilitiesClient(threading.Thread):
                            f'(fails={self._fail_count})')
             return
 
-        self._refresh(lat, lon)
+        self._refresh(lat, lon, radius)
 
     def _record_failure(self, reason: str):
         self._fail_count += 1
@@ -291,8 +316,8 @@ class FacilitiesClient(threading.Thread):
         self._fail_count = 0
         self._next_attempt_at = 0.0
 
-    def _refresh(self, lat: float, lon: float):
-        key = f'facilities:{bucket_key(lat, lon)}:{int(self.radius_nm)}'
+    def _refresh(self, lat: float, lon: float, radius_nm: float):
+        key = f'facilities:{bucket_key(lat, lon)}:{int(radius_nm)}'
         hit, cached = self.cache.get(key)
         if hit and cached is not None:
             facs = _hydrate(cached)
@@ -303,11 +328,11 @@ class FacilitiesClient(threading.Thread):
             self._record_success()
             return
 
-        self.status = f'fetching radius={self.radius_nm} NM @ {lat:.3f},{lon:.3f}'
+        self.status = f'fetching radius={radius_nm:g} NM @ {lat:.3f},{lon:.3f}'
         try:
             airports_raw = self._http_get(
                 f'/airports/near?lat={lat}&lon={lon}'
-                f'&radius_nm={self.radius_nm}&limit=500')
+                f'&radius_nm={radius_nm}&limit=500')
         except Exception as e:
             self._record_failure(f'airports fetch failed: {e}')
             return
@@ -355,7 +380,7 @@ class FacilitiesClient(threading.Thread):
         try:
             navaids_raw = self._http_get(
                 f'/navaids/near?lat={lat}&lon={lon}'
-                f'&radius_nm={self.radius_nm}&limit=500')
+                f'&radius_nm={radius_nm}&limit=500')
         except Exception:
             navaids_raw = []
         navaids = [
@@ -371,7 +396,7 @@ class FacilitiesClient(threading.Thread):
         ]
 
         facs = Facilities(
-            center_lat=lat, center_lon=lon, radius_nm=self.radius_nm,
+            center_lat=lat, center_lon=lon, radius_nm=radius_nm,
             fetched_at=time.time(), airports=airports, navaids=navaids)
         self.cache.put(key, _serialize(facs))
         with self._lock:

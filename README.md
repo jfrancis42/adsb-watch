@@ -399,6 +399,7 @@ Most everything is overridable via flag or `$ENV`:
 | `--internet`          | —                  | internet ADS-B off      |
 | `--internet-source`   | —                  | `adsb_lol` + `airplanes_live` |
 | `--internet-radius-nm`| —                  | `50`                    |
+| `--max-coverage-nm`   | —                  | `250` (web map views widen the radius up to this) |
 | `--local-priority-s`  | —                  | `5` (clamped < `--expiry`) |
 | `--internet` (OpenSky)| `OPENSKY_USERNAME` / `OPENSKY_PASSWORD` | anonymous |
 

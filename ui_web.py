@@ -51,6 +51,63 @@ class ViewerGate:
             return (time.time() - self._last_active) < self._linger_s
 
 
+class Coverage:
+    """How far out the data has to reach, driven by what viewers can SEE.
+
+    In MAP/VFR views the map fills the whole window, so a viewer sees past the
+    outer range ring out to the window corners -- at 100 NM on a wide screen,
+    well over 200 NM. Each client reports the radius its window covers
+    (``set_coverage``); the internet feeders and the facilities fetch query
+    the largest of those, because there is one shared data set (see
+    CenterControl for why that is forced).
+
+    Never less than ``floor_nm`` (``--internet-radius-nm``, so a curses-only or
+    viewer-less instance behaves exactly as before) and never more than
+    ``cap_nm``: the aggregators' point queries are bounded, and every extra NM
+    is area -- more aircraft in every frame sent to every client.
+
+    ``on_grow`` fires (outside the lock) when the effective radius increases,
+    so the facilities client can refetch now rather than at its next poll.
+    """
+
+    def __init__(self, floor_nm: float = 50.0, cap_nm: float = 250.0,
+                 on_grow: Optional[Callable] = None):
+        self.floor_nm = floor_nm
+        self.cap_nm = max(cap_nm, floor_nm)
+        self.on_grow = on_grow
+        self._want = {}
+        self._lock = threading.Lock()
+
+    def _effective(self) -> float:
+        want = max(self._want.values(), default=0.0)
+        return min(self.cap_nm, max(self.floor_nm, want))
+
+    def set(self, key, radius_nm) -> None:
+        try:
+            r = float(radius_nm)
+        except (TypeError, ValueError):
+            return
+        if not (r == r) or r <= 0:      # NaN / nonsense from a client
+            return
+        with self._lock:
+            before = self._effective()
+            self._want[key] = r
+            grew = self._effective() > before
+        if grew and self.on_grow is not None:
+            try:
+                self.on_grow()
+            except Exception as e:
+                print(f'coverage-grow hook failed: {type(e).__name__}: {e}')
+
+    def remove(self, key) -> None:
+        with self._lock:
+            self._want.pop(key, None)
+
+    def radius_nm(self) -> float:
+        with self._lock:
+            return self._effective()
+
+
 class CenterControl:
     """Applies scope re-centring requests coming from web clients.
 
@@ -202,9 +259,13 @@ class RadarServer:
 
     def __init__(self, engine, refresh_hz: float = 4.0, port: int = 8765,
                  overlay: Optional[dict] = None, viewer_gate: Optional['ViewerGate'] = None,
-                 center_control: Optional['CenterControl'] = None):
+                 center_control: Optional['CenterControl'] = None,
+                 coverage: Optional['Coverage'] = None):
         self.engine = engine
         self.refresh_hz = refresh_hz
+        # Per-client "how far can this window see", maxed into the radius the
+        # feeders and facilities fetch use. None => fixed radius as before.
+        self.coverage = coverage
         self.port = port
         # Handles 'set_center' / 'set_gps' commands from clients. None in
         # tests and in curses use; the control box stays hidden then.
@@ -263,6 +324,11 @@ class RadarServer:
             # Keep connection alive and handle any incoming messages
             last_cmd_at = 0.0
             async for message in websocket:
+                # Coverage reports are routine (every resize / range / view
+                # change), so they bypass the centre-command cooldown -- which
+                # would otherwise answer a window drag with "Slow down".
+                if self._handle_coverage(websocket, message):
+                    continue
                 now = time.time()
                 if now - last_cmd_at < CenterControl.COOLDOWN_S:
                     # Answer rather than drop: a swallowed command is a text
@@ -280,8 +346,24 @@ class RadarServer:
         finally:
             print(f"Client disconnected: {websocket.remote_address}")
             self.clients.discard(websocket)
+            if self.coverage is not None:
+                self.coverage.remove(websocket)
             if self.viewer_gate is not None:
                 self.viewer_gate.remove()
+
+    def _handle_coverage(self, websocket, message) -> bool:
+        """Consume a ``set_coverage`` message. True if it was one."""
+        if '"set_coverage"' not in message:     # cheap pre-check, no parse
+            return False
+        try:
+            msg = json.loads(message)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(msg, dict) or msg.get('cmd') != 'set_coverage':
+            return False
+        if self.coverage is not None:
+            self.coverage.set(websocket, msg.get('radius_nm'))
+        return True
 
     async def _handle_command(self, websocket, message):
         """Decode and apply one client control message.
@@ -529,10 +611,12 @@ class RadarServer:
 
 def run(engine, refresh_hz: float = 4.0, port: int = 8765, http_port: int = 8080,
         overlay: Optional[dict] = None, viewer_gate: Optional['ViewerGate'] = None,
-        center_control: Optional['CenterControl'] = None):
+        center_control: Optional['CenterControl'] = None,
+        coverage: Optional['Coverage'] = None):
     """Entry point for web UI. Starts WebSocket server and HTTP server for static files."""
     server = RadarServer(engine, refresh_hz, port, overlay=overlay,
-                         viewer_gate=viewer_gate, center_control=center_control)
+                         viewer_gate=viewer_gate, center_control=center_control,
+                         coverage=coverage)
 
     # Start HTTP server for static files in a background thread
     import http.server

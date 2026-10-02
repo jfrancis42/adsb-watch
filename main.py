@@ -87,7 +87,12 @@ def main():
                         'or nearly every aircraft reads as predicted.')
     p.add_argument('--internet-radius-nm', type=float, default=50.0,
                    help='Query radius (NM) around the observer for internet '
-                        'sources (default 50).')
+                        'sources (default 50). With --web this is the MINIMUM: '
+                        'it grows to what the widest viewer window can see.')
+    p.add_argument('--max-coverage-nm', type=float, default=250.0,
+                   help='Cap (NM) on how far web viewers can widen the '
+                        'internet query and the airport fetch (default 250, '
+                        'the most the point-query aggregators accept).')
     p.add_argument('--local-priority-s', type=float, default=5.0,
                    help='Seconds a local RTL-SDR fix suppresses internet data '
                         'for the same aircraft (default 5; auto-clamped below '
@@ -305,6 +310,19 @@ def main():
                         recorder=recorder)
         gps.start()
 
+    # --- Data radius follows what web viewers can see ---------------------
+    # Over a map the display reaches the window corners, well past the outer
+    # ring. Each browser reports how far its window sees; the feeders and the
+    # facilities fetch read the max of those on every poll. Without --web
+    # there are no reports and both stay at --internet-radius-nm / 50 NM.
+    coverage = None
+    if args.web:
+        coverage = ui_web.Coverage(
+            floor_nm=args.internet_radius_nm, cap_nm=args.max_coverage_nm,
+            on_grow=(facilities.wake if facilities is not None else None))
+        if facilities is not None:
+            facilities.attach_radius(coverage.radius_nm)
+
     # --- Internet ADS-B feeders (optional) -------------------------------
     # In web mode, gate the feeders on whether any browser is connected so we
     # pull one shared internet stream when someone's watching and none when
@@ -332,7 +350,8 @@ def main():
                     f'{", ".join(INTERNET_SOURCES)}')
         for src in sources:
             f = InternetFeeder(engine, src, engine.get_observer_position,
-                               radius_nm=args.internet_radius_nm,
+                               radius_nm=(coverage.radius_nm if coverage
+                                          else args.internet_radius_nm),
                                recorder=recorder,
                                should_poll=(viewer_gate.active
                                             if viewer_gate else None))
@@ -387,7 +406,8 @@ def main():
         if args.web:
             ui_web.run(engine, args.refresh_hz, port=args.web_port,
                        http_port=args.http_port, overlay=overlay,
-                       viewer_gate=viewer_gate, center_control=center_control)
+                       viewer_gate=viewer_gate, center_control=center_control,
+                       coverage=coverage)
         else:
             ui_curses.run(engine, args.refresh_hz)
     finally:

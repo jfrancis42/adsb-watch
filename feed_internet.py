@@ -224,6 +224,8 @@ class InternetFeeder(threading.Thread):
         self.source = source
         self.label, self.interval = SOURCES[source]
         self.get_observer = get_observer
+        # A number, or a zero-arg callable read on every poll (web viewers'
+        # window coverage -- see ui_web.Coverage).
         self.radius_nm = radius_nm
         self.recorder = recorder
         # Optional zero-arg predicate: return False to skip polling this cycle
@@ -246,13 +248,19 @@ class InternetFeeder(threading.Thread):
     def stop(self):
         self._stop.set()
 
-    def _fetch(self, lat: float, lon: float) -> list[dict]:
+    def _radius(self) -> float:
+        r = self.radius_nm() if callable(self.radius_nm) else self.radius_nm
+        # Whole NM: a fractional radius changes the URL on every resize for
+        # no benefit.
+        return float(math.ceil(r))
+
+    def _fetch(self, lat: float, lon: float, radius_nm: float) -> list[dict]:
         if self.source == 'adsb_lol':
-            return _fetch_point(_ADSB_LOL_BASE, lat, lon, self.radius_nm, 8.0)
+            return _fetch_point(_ADSB_LOL_BASE, lat, lon, radius_nm, 8.0)
         if self.source == 'airplanes_live':
-            return _fetch_point(_AIRPLANES_LIVE_BASE, lat, lon, self.radius_nm, 8.0)
+            return _fetch_point(_AIRPLANES_LIVE_BASE, lat, lon, radius_nm, 8.0)
         if self.source == 'opensky':
-            return _fetch_opensky(lat, lon, self.radius_nm, 12.0, self._auth_header)
+            return _fetch_opensky(lat, lon, radius_nm, 12.0, self._auth_header)
         return []
 
     def _ingest(self, aircraft: list[dict]) -> int:
@@ -299,14 +307,15 @@ class InternetFeeder(threading.Thread):
                 self._stop.wait(self.interval)
                 continue
             lat, lon = pos
+            radius = self._radius()
             try:
-                aircraft = self._fetch(lat, lon)
+                aircraft = self._fetch(lat, lon, radius)
                 if self.recorder is not None:
                     self.recorder.log(self.name_id, json.dumps({'ac': aircraft}))
                 n = self._ingest(aircraft)
                 self.engine.bump_count(self.name_id, n)
                 self.engine.report_feeder(
-                    self.name_id, f'connected {self.label} ({n} ac in {self.radius_nm:g} NM)')
+                    self.name_id, f'connected {self.label} ({n} ac in {radius:g} NM)')
                 backoff = self.interval
                 fails = 0
             except Exception as e:

@@ -201,9 +201,11 @@
         }
 
         /* The map, when a map view is selected. It sits BEHIND the canvas and
-           is clipped to a circle whose radius is the radar's outermost ring --
-           square box + border-radius:50%, which is cheaper and sharper than
-           clipping the canvas itself every frame.
+           fills the whole scope area, not just the outer range ring: the map
+           is context, and cutting it off at the ring threw away most of the
+           window. Only the map extends -- aircraft, trails and airports are
+           still bounded by the ring. The status bar is a sibling outside
+           #canvas-container, so it keeps its own dark background.
 
            pointer-events:none because the map is SLAVED to the radar: its
            centre is the observer and its zoom is derived from the range ring.
@@ -211,8 +213,8 @@
            would then be drawn in the wrong place over the map. */
         #map-layer {
             position: absolute;
+            inset: 0;
             display: none;
-            border-radius: 50%;
             overflow: hidden;
             pointer-events: none;
             background: #000;
