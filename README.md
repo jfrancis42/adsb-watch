@@ -188,6 +188,16 @@ adsb.lol answered with 429s that froze and blanked the radar.
   the egress exits (`--internet-exit` / `$ADSB_EXITS`). A hub failure never
   rotates the exits: the hub is on the LAN.
 
+#### On the office LAN, use https://radar.n0gq.org
+
+`adsb.n0gq.org` has a public AAAA (for IPv6-only clients outside), and with
+global IPv6 back on the office LAN, browsers there prefer it and reach the
+radar the long way: Starlink, the Oregon hub, WireGuard back to `pods`. On
+that path the websocket stalled for up to 24 s and every plane froze
+(2026-10-05). `radar.n0gq.org` is the same radar under an internal-only name
+(office DNS, no public record), so it stays on the LAN: 0.39 s max gap. The
+proper fix, internal IPv6 for the DMZ, is in skynet's `docs/todo.md`.
+
 #### Fix times, and why planes used to freeze and jump backwards
 
 Every internet position is a fix made some seconds before it arrives
