@@ -33,6 +33,7 @@ import urllib.parse
 import urllib.request
 
 from engine import Engine
+from exits import ExitRotator, is_network
 
 
 # --------------------------------------------------------------------------
@@ -43,12 +44,13 @@ from engine import Engine
 _USER_AGENT = 'adsb-watch/1.0 (+https://github.com/jfrancis42/adsb-watch)'
 
 
-def _get_json(url: str, timeout: float, headers: dict | None = None):
+def _get_json(url: str, timeout: float, headers: dict | None = None, opener=None):
     hdrs = {'User-Agent': _USER_AGENT, 'Accept': 'application/json'}
     if headers:
         hdrs.update(headers)
     req = urllib.request.Request(url, headers=hdrs)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    open_ = opener.open if opener is not None else urllib.request.urlopen
+    with open_(req, timeout=timeout) as r:
         return json.loads(r.read().decode('utf-8', 'ignore'))
 
 
@@ -70,11 +72,11 @@ _OPENSKY_BASE        = 'https://opensky-network.org/api'
 
 
 def _fetch_point(base: str, lat: float, lon: float, radius_nm: float,
-                 timeout: float) -> list[dict]:
+                 timeout: float, opener=None) -> list[dict]:
     """adsb.lol and airplanes.live share the readsb/tar1090 point endpoint and
     an already-canonical response ({'ac': [...]})."""
     url = f'{base}/point/{lat}/{lon}/{radius_nm}'
-    data = _get_json(url, timeout)
+    data = _get_json(url, timeout, opener=opener)
     return data.get('ac') or []
 
 
@@ -131,10 +133,10 @@ def _opensky_normalise(state: list, now: float) -> dict | None:
 
 
 def _fetch_opensky(lat: float, lon: float, radius_nm: float, timeout: float,
-                   auth_header: dict) -> list[dict]:
+                   auth_header: dict, opener=None) -> list[dict]:
     params = urllib.parse.urlencode(_opensky_bbox(lat, lon, radius_nm))
     url = f'{_OPENSKY_BASE}/states/all?{params}'
-    data = _get_json(url, timeout, headers=auth_header)
+    data = _get_json(url, timeout, headers=auth_header, opener=opener)
     states = data.get('states') or []
     now = time.time()
     return [a for s in states if (a := _opensky_normalise(s, now)) is not None]
@@ -214,7 +216,7 @@ class InternetFeeder(threading.Thread):
     daemon = True
 
     def __init__(self, engine: Engine, source: str, get_observer,
-                 radius_nm: float, recorder=None, should_poll=None):
+                 radius_nm: float, recorder=None, should_poll=None, exits=None):
         if source not in SOURCES:
             raise ValueError(f'unknown internet source {source!r}; '
                              f'choose from {", ".join(SOURCES)}')
@@ -234,6 +236,10 @@ class InternetFeeder(threading.Thread):
         # all viewers, and none at all when nobody is watching.
         self.should_poll = should_poll
         self._stop = threading.Event()
+        # Egress exits (exits.py): a broken PATH moves to the next exit; a
+        # refusal (401/403/429) does not -- it keeps the backoff below.
+        self.rotator = ExitRotator(exits or [('direct', None)])
+        self._net_streak = 0
 
         # OpenSky: optional auth improves the rate limit (5 s vs 10 s anon).
         self._auth_header: dict = {}
@@ -255,12 +261,13 @@ class InternetFeeder(threading.Thread):
         return float(math.ceil(r))
 
     def _fetch(self, lat: float, lon: float, radius_nm: float) -> list[dict]:
+        op = self.rotator.opener
         if self.source == 'adsb_lol':
-            return _fetch_point(_ADSB_LOL_BASE, lat, lon, radius_nm, 8.0)
+            return _fetch_point(_ADSB_LOL_BASE, lat, lon, radius_nm, 8.0, op)
         if self.source == 'airplanes_live':
-            return _fetch_point(_AIRPLANES_LIVE_BASE, lat, lon, radius_nm, 8.0)
+            return _fetch_point(_AIRPLANES_LIVE_BASE, lat, lon, radius_nm, 8.0, op)
         if self.source == 'opensky':
-            return _fetch_opensky(lat, lon, radius_nm, 12.0, self._auth_header)
+            return _fetch_opensky(lat, lon, radius_nm, 12.0, self._auth_header, op)
         return []
 
     def _ingest(self, aircraft: list[dict]) -> int:
@@ -314,11 +321,28 @@ class InternetFeeder(threading.Thread):
                     self.recorder.log(self.name_id, json.dumps({'ac': aircraft}))
                 n = self._ingest(aircraft)
                 self.engine.bump_count(self.name_id, n)
+                via = f' via {self.rotator.name}' if len(self.rotator.exits) > 1 else ''
                 self.engine.report_feeder(
-                    self.name_id, f'connected {self.label} ({n} ac in {radius:g} NM)')
+                    self.name_id, f'connected {self.label}{via} ({n} ac in {radius:g} NM)')
                 backoff = self.interval
                 fails = 0
+                self._net_streak = 0
+                fb = self.rotator.maybe_failback()
+                if fb:
+                    self.engine.report_feeder(self.name_id, f'{self.label}: {fb}')
             except Exception as e:
+                # A broken PATH: next exit and retry at once, so a dead proxy
+                # does not blank the radar. One full round of exits failing
+                # falls through to the normal backoff below. A REFUSAL never
+                # gets here as a path problem -- is_network() is False for it.
+                if is_network(e) and len(self.rotator.exits) > 1:
+                    self._net_streak += 1
+                    msg = self.rotator.network_failure()
+                    self.engine.report_feeder(
+                        self.name_id, f'{self.label}: {type(e).__name__}; {msg}')
+                    if self._net_streak < len(self.rotator.exits):
+                        continue
+                    self._net_streak = 0
                 fails += 1
                 self.engine.report_feeder(
                     self.name_id,

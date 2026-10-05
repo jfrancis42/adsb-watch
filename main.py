@@ -80,6 +80,12 @@ def main():
                         'adsb_lol (airplanes_live disabled 2026-08-29: the '
                         'service returns 403 to everyone). OpenSky honours '
                         '$OPENSKY_USERNAME/$OPENSKY_PASSWORD for a better rate.')
+    p.add_argument('--internet-exit', action='append', metavar='NAME[=URL]',
+                   help='Egress exit for internet sources (repeatable, in '
+                        'preference order): "direct" or NAME=socks5h://host:port. '
+                        'A broken path moves to the next exit; a refusal '
+                        '(401/403/429) does not -- it backs off. Default: '
+                        '$ADSB_EXITS, else direct only.')
     p.add_argument('--predict-stale', type=float, default=None, metavar='SECONDS',
                    help='Mark a position as predicted (dead-reckoned) once it is '
                         'this old. Default 3 s, which suits RF. Raise it for a '
@@ -344,6 +350,8 @@ def main():
         #     --internet-source adsb_lol --internet-source airplanes_live
         # and if the service comes back, restore it to this default list.
         sources = args.internet_source or ['adsb_lol']
+        from exits import parse_exits
+        internet_exits = parse_exits(args.internet_exit)
         unknown = [s for s in sources if s not in INTERNET_SOURCES]
         if unknown:
             p.error(f'unknown --internet-source {unknown}; choose from '
@@ -353,6 +361,7 @@ def main():
                                radius_nm=(coverage.radius_nm if coverage
                                           else args.internet_radius_nm),
                                recorder=recorder,
+                               exits=internet_exits,
                                should_poll=(viewer_gate.active
                                             if viewer_gate else None))
             f.start()

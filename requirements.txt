@@ -1,2 +1,3 @@
 pyModeS>=2.18
 websockets>=11.0
+pysocks>=1.7
