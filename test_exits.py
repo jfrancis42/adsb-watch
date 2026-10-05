@@ -85,3 +85,28 @@ def test_refusal_never_changes_exit(monkeypatch):
     used, waits = run_feeder(monkeypatch, [http_error(429), http_error(429), AC], EXITS)
     assert used == ["direct", "direct", "direct"], "429 keeps the same address"
     assert waits and waits[0] >= 2.0, "and backs off instead"
+
+
+def test_failback_while_hub_only_refuses(monkeypatch):
+    """2026-10-05: stuck on a hub that answered nothing but 429 -- the failback
+    only ran after a success, so it never came. It must run before each poll."""
+    eng = Engine()
+    f = InternetFeeder(eng, "adsb_lol", lambda: (39.35, -104.67), 50, exits=EXITS)
+    f.rotator.network_failure(0)      # direct -> us-hub, long ago
+    f.rotator.failback_s = 60
+    used, outcomes = [], [http_error(429), AC]
+
+    def fake_fetch(lat, lon, radius):
+        used.append(f.rotator.name)
+        out = outcomes.pop(0)
+        if not outcomes:
+            f.stop()
+        if isinstance(out, BaseException):
+            raise out
+        return out
+
+    monkeypatch.setattr(f, "_fetch", fake_fetch)
+    real_wait = f._stop.wait
+    monkeypatch.setattr(f._stop, "wait", lambda t: real_wait(0))
+    f.run()
+    assert used == ["direct", "direct"], used

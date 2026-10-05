@@ -315,6 +315,11 @@ class InternetFeeder(threading.Thread):
                 continue
             lat, lon = pos
             radius = self._radius()
+            # Before the fetch, not after a success: a hub that answers
+            # nothing but 429 never produces a success to fail back from.
+            fb = self.rotator.maybe_failback()
+            if fb:
+                self.engine.report_feeder(self.name_id, f'{self.label}: {fb}')
             try:
                 aircraft = self._fetch(lat, lon, radius)
                 if self.recorder is not None:
@@ -327,9 +332,6 @@ class InternetFeeder(threading.Thread):
                 backoff = self.interval
                 fails = 0
                 self._net_streak = 0
-                fb = self.rotator.maybe_failback()
-                if fb:
-                    self.engine.report_feeder(self.name_id, f'{self.label}: {fb}')
             except Exception as e:
                 # A broken PATH: next exit and retry at once, so a dead proxy
                 # does not blank the radar. One full round of exits failing

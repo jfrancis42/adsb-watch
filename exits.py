@@ -17,7 +17,12 @@ WHAT ROTATES AND WHAT DOES NOT
 * A REFUSAL -- HTTP 401/403/429 -- is the provider limiting *us*. It is NOT
   answered by changing address: that would be evading the limit. The feeder
   keeps its existing backoff on the same exit and the same source.
-* After ``failback_s`` on a later exit, the first one is tried again.
+* After ``failback_s`` on a later exit, the first one is tried again --
+  checked before every poll, not only after a success: the hub proxies are
+  datacenter addresses that adsb.lol rate-limits far harder than the office
+  line, so a feeder left on a hub can sit in 429s for hours (2026-10-05:
+  a DNS blip at 10:47 UTC kept the radar on the hubs, blanking every few
+  seconds). Returning to the FIRST exit is going home, not evading a limit.
 
 Ported from adsb-log (sources.PathManager), which verified the same rule
 against a dead proxy in production on 2026-10-04.
@@ -80,7 +85,7 @@ def is_network(exc: BaseException) -> bool:
 class ExitRotator:
     """One per feeder thread (no locking needed)."""
 
-    def __init__(self, exits: list[tuple[str, str | None]], failback_s: float = 900):
+    def __init__(self, exits: list[tuple[str, str | None]], failback_s: float = 120):
         self.exits = exits
         self.openers = [_opener(u) for _, u in exits]
         self.current = 0
