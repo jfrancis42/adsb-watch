@@ -110,3 +110,49 @@ def test_failback_while_hub_only_refuses(monkeypatch):
     monkeypatch.setattr(f._stop, "wait", lambda t: real_wait(0))
     f.run()
     assert used == ["direct", "direct"], used
+
+
+# --- adsb-hub (2026-10-05) ----------------------------------------------------
+
+import feed_internet as FI
+
+
+def hub_feeder(monkeypatch, hub, direct):
+    eng = Engine()
+    f = InternetFeeder(eng, "hub", lambda: (39.35, -104.67), 50, exits=EXITS)
+    monkeypatch.setattr(FI, "_fetch_hub", hub)
+    monkeypatch.setattr(FI, "_fetch_point", direct)
+    return eng, f
+
+
+FEED = {"center": {"lat": 39.35, "lon": -104.67, "radius_nm": 100}}
+
+
+def test_hub_is_read_and_its_receivers_count_as_local(monkeypatch):
+    rf = dict(AC[0], hex="def456", src="rf")
+    eng, f = hub_feeder(monkeypatch, lambda *a: ([AC[0], rf], FEED),
+                        lambda *a: pytest.fail("no direct poll while the hub answers"))
+    assert len(f._fetch(39.35, -104.67, 50)) == 2
+    assert f.label == "adsb-hub" and f.interval == 1.0
+    assert f.hub_circle == (39.35, -104.67, 100)
+    calls = []
+    monkeypatch.setattr(eng, "update_aircraft", lambda icao, source, **kw: calls.append((icao, source)))
+    f._ingest([AC[0], rf])
+    assert calls == [("abc123", "internet"), ("def456", "local")]
+
+
+def test_hub_down_falls_back_to_adsb_lol_without_rotating_exits(monkeypatch):
+    def down(*a):
+        raise ConnectionRefusedError("hub")
+    eng, f = hub_feeder(monkeypatch, down, lambda *a: AC)
+    assert f._fetch(39.35, -104.67, 50) == AC
+    assert f.label == "adsb.lol direct (hub down)" and f.interval == 2.0
+    assert f.rotator.name == "direct", "a hub failure is not a broken internet exit"
+
+
+def test_view_outside_the_hub_circle_polls_directly(monkeypatch):
+    eng, f = hub_feeder(monkeypatch, lambda *a: pytest.fail("hub cannot cover this"),
+                        lambda *a: AC)
+    f.hub_circle = (39.35, -104.67, 100)
+    assert f._fetch(40.8, -111.9, 50) == AC          # Salt Lake City
+    assert f.label == "adsb.lol direct (outside hub)"

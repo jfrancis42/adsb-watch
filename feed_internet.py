@@ -33,6 +33,7 @@ import urllib.parse
 import urllib.request
 
 from engine import Engine
+from geo import haversine_nm
 from exits import ExitRotator, is_network
 
 
@@ -69,6 +70,20 @@ def _num(x):
 _ADSB_LOL_BASE       = 'https://api.adsb.lol/v2'
 _AIRPLANES_LIVE_BASE = 'https://api.airplanes.live/v2'
 _OPENSKY_BASE        = 'https://opensky-network.org/api'
+
+# adsb-hub (~/Dropbox/build/adsb-hub): the estate's one ADS-B poller, which
+# also merges the office's own dump1090-fa receivers. Address it by NAME.
+_HUB_URL = os.environ.get('ADSB_HUB_URL',
+                          'http://adsb-hub.n0gq.org:8080/aircraft.json')
+
+
+def _fetch_hub(url: str, lat: float, lon: float, radius_nm: float,
+               timeout: float) -> tuple[list[dict], dict]:
+    """-> (aircraft, hub status). ?live=1 tells the hub a viewer is watching,
+    which makes it poll the internet every 2 s instead of 5."""
+    q = urllib.parse.urlencode({'lat': lat, 'lon': lon, 'nm': radius_nm, 'live': 1})
+    data = _get_json(f'{url}?{q}', timeout)
+    return data.get('aircraft') or [], data.get('feed') or {}
 
 
 def _fetch_point(base: str, lat: float, lon: float, radius_nm: float,
@@ -195,7 +210,15 @@ def canonical_to_kwargs(ac: dict):
 # steady stream of `429 Too Many Requests` from adsb.lol.  2.0 s halves the
 # request rate and still leaves 5x margin against the 10 s track expiry, so the
 # display stays populated between polls.
+#
+# 'hub' is the default since 2026-10-05: one poller for the estate instead of
+# this radar and adsb-log both polling from the office address (adsb.lol
+# answered with 429s that froze and blanked the radar). Reading the hub over
+# the LAN costs nothing, hence 1 s. When the scope is centred where the hub's
+# circle does not reach -- or the hub is down -- this feeder polls adsb.lol
+# itself, at adsb.lol's own 2 s.
 SOURCES = {
+    'hub':            ('adsb-hub',        1.0),
     'adsb_lol':       ('adsb.lol',        2.0),
     'airplanes_live': ('airplanes.live',  2.0),
     'opensky':        ('OpenSky',        10.0),
@@ -240,6 +263,11 @@ class InternetFeeder(threading.Thread):
         # refusal (401/403/429) does not -- it keeps the backoff below.
         self.rotator = ExitRotator(exits or [('direct', None)])
         self._net_streak = 0
+        # hub: its circle (lat, lon, radius), learned from its answers; None
+        # until the first one, so the hub is always tried first.
+        self.hub_url = _HUB_URL
+        self.hub_circle: tuple[float, float, float] | None = None
+        self.hub_error = ''
 
         # OpenSky: optional auth improves the rate limit (5 s vs 10 s anon).
         self._auth_header: dict = {}
@@ -260,8 +288,36 @@ class InternetFeeder(threading.Thread):
         # no benefit.
         return float(math.ceil(r))
 
+    def _hub_covers(self, lat: float, lon: float, radius_nm: float) -> bool:
+        if self.hub_circle is None:
+            return True
+        hlat, hlon, hr = self.hub_circle
+        return haversine_nm(hlat, hlon, lat, lon) + radius_nm <= hr + 1.0
+
+    def _fetch_via_hub(self, lat: float, lon: float, radius_nm: float) -> list[dict]:
+        """The hub when it covers the view and answers; else adsb.lol directly.
+        A hub failure is NOT a broken exit: it never rotates the exits, which
+        are for reaching the internet, and the hub is on the LAN."""
+        if self._hub_covers(lat, lon, radius_nm):
+            try:
+                ac, feed = _fetch_hub(self.hub_url, lat, lon, radius_nm, 5.0)
+                c = feed.get('center') or {}
+                if {'lat', 'lon', 'radius_nm'} <= c.keys():
+                    self.hub_circle = (c['lat'], c['lon'], c['radius_nm'])
+                self.label, self.interval, self.hub_error = 'adsb-hub', 1.0, ''
+                return ac
+            except Exception as e:            # noqa: BLE001 -- any hub failure
+                self.hub_error = f'{type(e).__name__}: {e}'
+                why = 'hub down'
+        else:
+            why = 'outside hub'
+        self.label, self.interval = f'adsb.lol direct ({why})', 2.0
+        return _fetch_point(_ADSB_LOL_BASE, lat, lon, radius_nm, 8.0, self.rotator.opener)
+
     def _fetch(self, lat: float, lon: float, radius_nm: float) -> list[dict]:
         op = self.rotator.opener
+        if self.source == 'hub':
+            return self._fetch_via_hub(lat, lon, radius_nm)
         if self.source == 'adsb_lol':
             return _fetch_point(_ADSB_LOL_BASE, lat, lon, radius_nm, 8.0, op)
         if self.source == 'airplanes_live':
@@ -276,7 +332,10 @@ class InternetFeeder(threading.Thread):
             icao, kw = canonical_to_kwargs(ac)
             if icao is None or 'lat' not in kw:
                 continue  # need a position to plot
-            self.engine.update_aircraft(icao, source='internet', **kw)
+            # The hub marks what the office's own receivers heard: that is
+            # LOCAL data, and the engine gives it precedence like any local feed.
+            src = 'local' if ac.get('src') == 'rf' else 'internet'
+            self.engine.update_aircraft(icao, source=src, **kw)
             pushed += 1
         return pushed
 
@@ -326,7 +385,8 @@ class InternetFeeder(threading.Thread):
                     self.recorder.log(self.name_id, json.dumps({'ac': aircraft}))
                 n = self._ingest(aircraft)
                 self.engine.bump_count(self.name_id, n)
-                via = f' via {self.rotator.name}' if len(self.rotator.exits) > 1 else ''
+                via = (f' via {self.rotator.name}'
+                       if len(self.rotator.exits) > 1 and self.label != 'adsb-hub' else '')
                 self.engine.report_feeder(
                     self.name_id, f'connected {self.label}{via} ({n} ac in {radius:g} NM)')
                 backoff = self.interval

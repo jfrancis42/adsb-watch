@@ -76,8 +76,9 @@ def main():
                         'Default off.')
     p.add_argument('--internet-source', action='append', metavar='SOURCE',
                    help='Which internet source(s) to use (repeatable). Choose '
-                        'from: adsb_lol, airplanes_live, opensky. Default: '
-                        'adsb_lol (airplanes_live disabled 2026-08-29: the '
+                        'from: hub, adsb_lol, airplanes_live, opensky. Default: '
+                        'hub -- adsb-hub ($ADSB_HUB_URL), falling back to adsb.lol '
+                        'away from home or with the hub down (airplanes_live disabled 2026-08-29: the '
                         'service returns 403 to everyone). OpenSky honours '
                         '$OPENSKY_USERNAME/$OPENSKY_PASSWORD for a better rate.')
     p.add_argument('--internet-exit', action='append', metavar='NAME[=URL]',
@@ -349,7 +350,9 @@ def main():
         # real problems.  The driver code is untouched: re-enable with
         #     --internet-source adsb_lol --internet-source airplanes_live
         # and if the service comes back, restore it to this default list.
-        sources = args.internet_source or ['adsb_lol']
+        # 'hub' (adsb-hub, 2026-10-05) is the default; it falls back to
+        # adsb.lol by itself away from home or with the hub down.
+        sources = args.internet_source or ['hub']
         from exits import parse_exits
         internet_exits = parse_exits(args.internet_exit)
         unknown = [s for s in sources if s not in INTERNET_SOURCES]
