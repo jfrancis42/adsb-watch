@@ -634,6 +634,19 @@ def run(engine, refresh_hz: float = 4.0, port: int = 8765, http_port: int = 8080
         def log_message(self, format, *args):
             pass  # Suppress HTTP logs
 
+        def send_head(self):
+            # The radar is the only page: any path that is not a file in
+            # web/ (/, a directory, a typo) redirects to it, instead of a
+            # directory listing or a 404. Owner's request, 2026-10-05.
+            path = self.translate_path(self.path)
+            if not os.path.isfile(path):
+                self.send_response(302)
+                self.send_header('Location', '/radar.html')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return None
+            return super().send_head()
+
     socketserver.TCPServer.allow_reuse_address = True
     httpd = socketserver.TCPServer(("", http_port), Handler)
     http_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
