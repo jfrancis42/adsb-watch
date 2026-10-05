@@ -22,7 +22,14 @@ server {
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_ciphers         HIGH:!aNULL:!MD5;
 
-    server_name adsb.n0gq.org;
+    # radar.n0gq.org: an INTERNAL-ONLY name for the same radar (office DNS,
+    # no public record, so no public AAAA). adsb.n0gq.org has a public AAAA on
+    # purpose (IPv6-only clients outside, 2026-09-12), and once the office LAN
+    # got global IPv6 back, LAN browsers preferred it and hairpinned through
+    # the Oregon hub over Starlink -- where the websocket stalled for up to
+    # 24 s and every plane froze (2026-10-05). radar.n0gq.org stays on the LAN
+    # until internal IPv6 exists (skynet todo: owned ULA, ipv6.md 3).
+    server_name adsb.n0gq.org radar.n0gq.org;
 
 {% for a in lan_vhost_allow %}
     allow {{ a.cidr }};{% if a.why is defined %}   # {{ a.why }}{% endif %}
