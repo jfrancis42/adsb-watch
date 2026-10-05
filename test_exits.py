@@ -133,7 +133,7 @@ def test_hub_is_read_and_its_receivers_count_as_local(monkeypatch):
     eng, f = hub_feeder(monkeypatch, lambda *a: ([AC[0], rf], FEED),
                         lambda *a: pytest.fail("no direct poll while the hub answers"))
     assert len(f._fetch(39.35, -104.67, 50)) == 2
-    assert f.label == "adsb-hub" and f.interval == 1.0
+    assert f.label == "adsb-hub" and f.interval == 0.25
     assert f.hub_circle == (39.35, -104.67, 100)
     calls = []
     monkeypatch.setattr(eng, "update_aircraft", lambda icao, source, **kw: calls.append((icao, source)))
@@ -156,3 +156,40 @@ def test_view_outside_the_hub_circle_polls_directly(monkeypatch):
     f.hub_circle = (39.35, -104.67, 100)
     assert f._fetch(40.8, -111.9, 50) == AC          # Salt Lake City
     assert f.label == "adsb.lol direct (outside hub)"
+
+
+# --- position fix times (2026-10-05: planes froze and jumped backwards) ------
+
+def test_repeated_or_older_fix_does_not_move_the_plane_back():
+    eng = Engine()
+    now = __import__("time").time()
+    eng.update_aircraft("abc123", lat=39.40, lon=-104.70, course_deg=90, speed_kt=200,
+                        source="internet", pos_time=now - 1)
+    a = eng._aircraft["ABC123"]
+    assert a.last_pos == now - 1, "dead-reckon from the FIX time, not arrival"
+    # the hub re-serves the same fix a second later; then an older one
+    eng.update_aircraft("abc123", lat=39.40, lon=-104.70, source="internet", pos_time=now - 1)
+    eng.update_aircraft("abc123", lat=39.39, lon=-104.71, source="internet", pos_time=now - 3)
+    assert (a.lat, a.lon, a.last_pos) == (39.40, -104.70, now - 1)
+    eng.update_aircraft("abc123", lat=39.40, lon=-104.69, source="internet", pos_time=now)
+    assert a.lon == -104.69 and a.last_pos == now
+
+
+def test_fetchers_stamp_fix_times_from_the_answers_own_clock():
+    ac = FI._stamp([{"hex": "a", "seen_pos": 2.5}, {"hex": "b"}], 1_790_000_000_000)  # ms
+    assert ac[0]["_pos_t"] == 1_789_999_997.5 and "_pos_t" not in ac[1]
+    _, kw = FI.canonical_to_kwargs({**AC[0], "_pos_t": 123.0})
+    assert kw["pos_time"] == 123.0
+
+
+def test_hub_projection_is_plotted_and_fix_age_kept():
+    a = {"hex": "abc123", "lat": 39.0, "lon": -104.0, "dr_lat": 39.01, "dr_lon": -104.0,
+         "alt_baro": 9000, "dr_alt": 9100, "seen_pos": 4.0, "_pos_t": 1000.0}
+    b = FI._hub_projected(a)
+    assert (b["lat"], b["alt_baro"], b["_pos_t"], b["_fix_t"]) == (39.01, 9100, 1004.0, 1000.0)
+    eng = Engine(predict_stale_s=3)
+    now = __import__("time").time()
+    _, kw = FI.canonical_to_kwargs({**b, "_pos_t": now, "_fix_t": now - 4})
+    eng.update_aircraft("abc123", source="internet", **kw)
+    [t] = eng.snapshot().tracks
+    assert t.lat == 39.01 and t.predicted, "plotted at the hub's projection, flagged by fix age"

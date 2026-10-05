@@ -155,18 +155,60 @@ python3 main.py --no-launch-dump1090 --internet \
 python3 main.py --internet
 ```
 
-Sources (repeat `--internet-source` to pick a subset; default is
-`adsb_lol` + `airplanes_live`):
+Sources (repeat `--internet-source` to pick a subset; default is `hub`):
 
 | source           | endpoint                | poll   | notes |
 |------------------|-------------------------|--------|-------|
-| `adsb_lol`       | api.adsb.lol/v2         | 1 s    | readsb/tar1090 backend |
-| `airplanes_live` | api.airplanes.live/v2   | 1 s    | same format as adsb.lol |
+| `hub`            | adsb-hub (`$ADSB_HUB_URL`, default `http://adsb-hub.n0gq.org:8080/aircraft.json`) | 0.25 s | **default since 2026-10-05** -- see below |
+| `adsb_lol`       | api.adsb.lol/v2         | 2 s    | readsb/tar1090 backend. 1 s drew 429s (2026-08-29) |
+| `airplanes_live` | api.airplanes.live/v2   | 2 s    | same format as adsb.lol. **Disabled**: answers 403 to everyone since 2026-08-29 |
 | `opensky`        | opensky-network.org     | 10 s (anon) / 5 s (auth) | bounding-box; set `OPENSKY_USERNAME`/`OPENSKY_PASSWORD` for the better rate |
 
 ```bash
 python3 main.py --internet --internet-source opensky --internet-radius-nm 80
 ```
+
+#### The `hub` source (adsb-hub)
+
+[adsb-hub](../adsb-hub/README.md) is the estate's one ADS-B poller: it polls
+adsb.fi/adsb.lol once for 100 NM around the house, merges the office's own
+dump1090-fa receivers, and **dead-reckons** every aircraft. Before it, this
+radar and adsb-log each polled the internet from the same office address, and
+adsb.lol answered with 429s that froze and blanked the radar.
+
+* The radar plots the hub's projected position (`dr_lat`/`dr_lon`/`dr_alt`),
+  read four times a second. The hub does the dead reckoning; the engine's own
+  projection only bridges the < 0.25 s between samples. Age, the "predicted"
+  dimming and expiry are judged by the hub's real fix time (`seen_pos`), not
+  by when the projection was sampled.
+* Aircraft the hub got from an office receiver (`src: "rf"`) are **local**
+  data to the engine, so they take precedence like any local feed.
+* When the scope is centred where the hub's 100 NM circle does not reach, or
+  the hub does not answer, this feeder polls adsb.lol itself (2 s), through
+  the egress exits (`--internet-exit` / `$ADSB_EXITS`). A hub failure never
+  rotates the exits: the hub is on the LAN.
+
+#### Fix times, and why planes used to freeze and jump backwards
+
+Every internet position is a fix made some seconds before it arrives
+(`seen_pos`). Until 2026-10-05 the engine took each one as made *now*. An
+aggregator re-serving an aircraft's last fix then snapped the plane back to it
+on every poll (it **froze**), and re-reading a source faster than it refreshed
+put every plane back by a poll's worth of travel (it **jumped backwards** --
+12% of all plotted steps). Now each fix carries its real time, a fix no newer
+than the one held is ignored, and projection runs from the real fix time.
+Measured after the change: 4 backward steps in 14,000 (fixes correcting an
+overshooting projection), and no stalls in two minutes.
+
+#### Exits
+
+`--internet-exit NAME=socks5h://host:port` (repeatable) or `$ADSB_EXITS`. A
+broken path (timeout, dead proxy, 5xx) moves to the next exit; a refusal
+(401/403/429) never does -- changing address to get around a provider's limit
+is evading it. The first exit is retried every 2 min, checked before every
+poll: when the failback ran only after a *successful* poll, a hub proxy
+answering nothing but 429 never produced one, and the radar sat on the
+proxies for hours after a DNS blip (2026-10-05).
 
 **Local data takes priority.** When both a local RTL-SDR and an internet source
 report the same aircraft (matched by ICAO hex), the local position wins — the
@@ -397,7 +439,8 @@ Most everything is overridable via flag or `$ENV`:
 | `--kml`               | —                  | web KML overlay off     |
 | `--kml-file`          | —                  | `COPA_v7_01-12-2026.kmz` |
 | `--internet`          | —                  | internet ADS-B off      |
-| `--internet-source`   | —                  | `adsb_lol` + `airplanes_live` |
+| `--internet-source`   | `ADSB_HUB_URL` (for `hub`) | `hub` |
+| `--internet-exit`     | `ADSB_EXITS`       | `direct` only           |
 | `--internet-radius-nm`| —                  | `50`                    |
 | `--max-coverage-nm`   | —                  | `250` (web map views widen the radius up to this) |
 | `--local-priority-s`  | —                  | `5` (clamped < `--expiry`) |

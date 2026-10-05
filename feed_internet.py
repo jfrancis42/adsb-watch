@@ -55,6 +55,27 @@ def _get_json(url: str, timeout: float, headers: dict | None = None, opener=None
         return json.loads(r.read().decode('utf-8', 'ignore'))
 
 
+def _stamp(aircraft: list[dict], ref_now) -> list[dict]:
+    """Give each aircraft ``_pos_t``: the epoch time of its position fix,
+    = the answer's own clock minus ``seen_pos``.
+
+    Without it every position was taken as fixed NOW, the moment it arrived.
+    An aggregator re-serving an aircraft's last fix (seen_pos growing) then
+    snapped it back to that point on every poll -- the plane FROZE -- and the
+    radar re-reading the hub faster than the hub refreshes (1 s vs 2 s) put
+    each plane back by a second's travel: planes jumped BACKWARDS along their
+    tracks (2026-10-05: 12% of all steps). The engine now drops a fix that is
+    not newer than the one it has, and dead-reckons from the real fix time."""
+    if not isinstance(ref_now, (int, float)) or isinstance(ref_now, bool):
+        return aircraft
+    ref = ref_now / 1000.0 if ref_now > 1e11 else float(ref_now)   # adsb.lol: ms
+    for ac in aircraft:
+        sp = ac.get('seen_pos')
+        if isinstance(sp, (int, float)) and not isinstance(sp, bool):
+            ac['_pos_t'] = ref - float(sp)
+    return aircraft
+
+
 def _num(x):
     """Return x as a float if it's a real number (not bool/str/None), else None."""
     if isinstance(x, bool):
@@ -83,7 +104,25 @@ def _fetch_hub(url: str, lat: float, lon: float, radius_nm: float,
     which makes it poll the internet every 2 s instead of 5."""
     q = urllib.parse.urlencode({'lat': lat, 'lon': lon, 'nm': radius_nm, 'live': 1})
     data = _get_json(f'{url}?{q}', timeout)
-    return data.get('aircraft') or [], data.get('feed') or {}
+    return _stamp(data.get('aircraft') or [], data.get('now')), data.get('feed') or {}
+
+
+def _hub_projected(ac: dict) -> dict:
+    """Plot the HUB's dead reckoning: it projects every fix to its answer's
+    `now` (dr_*), and that is the position used. The engine is told when the
+    real fix was (_fix_t) so age and "predicted" stay honest. Read four times
+    a second, the engine's own projection only bridges < 0.25 s between
+    samples -- the hub does the dead reckoning (owner's rule, 2026-10-05)."""
+    if ac.get('dr_lat') is None or ac.get('dr_lon') is None or '_pos_t' not in ac:
+        return ac
+    b = dict(ac)
+    fix_t = b['_pos_t']
+    b['lat'], b['lon'] = b['dr_lat'], b['dr_lon']
+    if 'dr_alt' in b:
+        b['alt_baro'] = b['dr_alt']
+    b['_pos_t'] = fix_t + float(b.get('seen_pos') or 0.0)     # the hub's `now`
+    b['_fix_t'] = fix_t
+    return b
 
 
 def _fetch_point(base: str, lat: float, lon: float, radius_nm: float,
@@ -92,7 +131,7 @@ def _fetch_point(base: str, lat: float, lon: float, radius_nm: float,
     an already-canonical response ({'ac': [...]})."""
     url = f'{base}/point/{lat}/{lon}/{radius_nm}'
     data = _get_json(url, timeout, opener=opener)
-    return data.get('ac') or []
+    return _stamp(data.get('ac') or [], data.get('now'))
 
 
 # OpenSky state-vector field indices (states/all response)
@@ -144,6 +183,8 @@ def _opensky_normalise(state: list, now: float) -> dict | None:
         'baro_rate': vr * 196.850 if vr is not None else None,       # m/s -> ft/min
         'seen_pos': round(now - t_pos, 1) if t_pos is not None else None,
     }
+    if t_pos is not None:
+        ac['_pos_t'] = float(t_pos)
     return ac
 
 
@@ -193,6 +234,10 @@ def canonical_to_kwargs(ac: dict):
     trk = _num(ac.get('track'))
     if trk is not None:
         kw['course_deg'] = trk
+    if isinstance(ac.get('_pos_t'), float):
+        kw['pos_time'] = ac['_pos_t']
+    if isinstance(ac.get('_fix_t'), float):
+        kw['fix_time'] = ac['_fix_t']
     vr = ac.get('baro_rate')
     vr_n = _num(vr) if vr is not None else _num(ac.get('geom_rate'))
     if vr_n is not None:
@@ -214,11 +259,12 @@ def canonical_to_kwargs(ac: dict):
 # 'hub' is the default since 2026-10-05: one poller for the estate instead of
 # this radar and adsb-log both polling from the office address (adsb.lol
 # answered with 429s that froze and blanked the radar). Reading the hub over
-# the LAN costs nothing, hence 1 s. When the scope is centred where the hub's
+# the LAN costs nothing, hence 0.25 s: the hub dead-reckons, and four samples
+# a second keep the plot smooth without a second projection here. When the scope is centred where the hub's
 # circle does not reach -- or the hub is down -- this feeder polls adsb.lol
 # itself, at adsb.lol's own 2 s.
 SOURCES = {
-    'hub':            ('adsb-hub',        1.0),
+    'hub':            ('adsb-hub',        0.25),
     'adsb_lol':       ('adsb.lol',        2.0),
     'airplanes_live': ('airplanes.live',  2.0),
     'opensky':        ('OpenSky',        10.0),
@@ -304,8 +350,8 @@ class InternetFeeder(threading.Thread):
                 c = feed.get('center') or {}
                 if {'lat', 'lon', 'radius_nm'} <= c.keys():
                     self.hub_circle = (c['lat'], c['lon'], c['radius_nm'])
-                self.label, self.interval, self.hub_error = 'adsb-hub', 1.0, ''
-                return ac
+                self.label, self.interval, self.hub_error = 'adsb-hub', 0.25, ''
+                return [_hub_projected(a) for a in ac]
             except Exception as e:            # noqa: BLE001 -- any hub failure
                 self.hub_error = f'{type(e).__name__}: {e}'
                 why = 'hub down'

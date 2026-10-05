@@ -36,6 +36,11 @@ class Aircraft:
     vrate_fpm: Optional[float] = None
     last_seen: float = 0.0
     last_pos: float = 0.0
+    # When the displayed position was actually MEASURED. Equal to last_pos,
+    # except for adsb-hub data: the hub dead-reckons, so its position is a
+    # projection sampled now (last_pos) of a fix made earlier (fix_t). Age,
+    # "predicted" and expiry are judged by the fix, not the projection.
+    fix_t: float = 0.0
     # When we last got a *local* (RTL-SDR) position fix for this aircraft.
     # Used to give local data priority over internet-streamed data: while this
     # is fresh, internet position updates for the same ICAO are ignored. 0.0
@@ -290,7 +295,9 @@ class Engine:
 
     def update_aircraft(self, icao: str, *, callsign=None, lat=None, lon=None,
                         alt_ft=None, course_deg=None, speed_kt=None,
-                        vrate_fpm=None, source: str = 'local'):
+                        vrate_fpm=None, source: str = 'local',
+                        pos_time: float | None = None,
+                        fix_time: float | None = None):
         """Merge an aircraft update.
 
         `source` is 'local' (RTL-SDR: SBS/AVR/UAT feeders) or 'internet'
@@ -331,6 +338,15 @@ class Engine:
                 and (now - ac.last_local_pos) <= self.local_priority_s
             )
 
+            # A fix no newer than the one already held is a repeat (an
+            # aggregator re-serving its last fix, or the hub read faster than
+            # it refreshes). Applying it as if fixed now dragged the plane
+            # back along its track, or froze it. pos_time is when the fix was
+            # made; without one (local RF) it is now.
+            t_fix = now if pos_time is None else min(pos_time, now)
+            if lat is not None and lon is not None and t_fix <= ac.last_pos:
+                suppress_kinematics = True
+
             if not suppress_kinematics:
                 if alt_ft   is not None:   ac.alt_ft = alt_ft
                 if course_deg is not None: ac.course_deg = course_deg
@@ -338,10 +354,11 @@ class Engine:
                 if vrate_fpm  is not None: ac.vrate_fpm = vrate_fpm
                 if lat is not None and lon is not None:
                     ac.lat, ac.lon = lat, lon
-                    ac.last_pos = now
+                    ac.last_pos = t_fix
+                    ac.fix_t = t_fix if fix_time is None else min(fix_time, t_fix)
                     ac.pos_source = source
                     if source == 'local':
-                        ac.last_local_pos = now
+                        ac.last_local_pos = t_fix
 
             ac.last_seen = now
             self._aircraft[icao] = ac
@@ -396,7 +413,7 @@ class Engine:
             # other message types).
             visible = [a for a in self._aircraft.values()
                        if a.lat is not None and a.lon is not None
-                       and (now - a.last_pos) <= self.expiry_s]
+                       and (now - (a.fix_t or a.last_pos)) <= self.expiry_s]
             tracks = [self._track_for(a, obs, now) for a in visible]
         tracks.sort(key=lambda t: (t.distance_nm is None, t.distance_nm or 0.0))
         with self._lock:
@@ -448,8 +465,9 @@ class Engine:
         else:
             dr_lat = dr_lon = dr_alt = None
 
-        predicted_age = elapsed
-        is_predicted = elapsed >= self.predict_stale_s
+        # Projection runs from last_pos; staleness is the age of the real fix.
+        predicted_age = max(0.0, now - (a.fix_t or a.last_pos))
+        is_predicted = predicted_age >= self.predict_stale_s
 
         dist = az = el = None
         cpa_d = cpa_t = cpa_az = None
