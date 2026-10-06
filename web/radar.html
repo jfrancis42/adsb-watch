@@ -237,6 +237,19 @@
            and the VFR chart, and green-on-cream is exactly the contrast
            problem the scope symbology already had. pointer-events:none so it
            never swallows a click meant for the scope. */
+        #ac-info {
+            position: absolute;
+            left: 10px;
+            bottom: 8px;
+            max-width: min(420px, calc(100% - 20px));
+            padding: 6px 9px;
+            border-radius: 3px;
+            background: rgba(0, 0, 0, 0.78);
+            color: #00ff00;
+            font: 12px/1.4 "Courier New", monospace;
+            z-index: 5;
+        }
+        #ac-info .dim { color: #7a9a7a; }
         #readout {
             position: absolute;
             right: 10px;
@@ -388,6 +401,7 @@
         <div id="canvas-container">
             <div id="map-layer"></div>
             <canvas id="radar"></canvas>
+            <div id="ac-info" hidden></div>
             <div id="readout">
                 <span id="observer-pos">Observer: --</span>
                 <span id="track-count">Tracks: 0</span>

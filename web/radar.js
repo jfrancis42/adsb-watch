@@ -51,6 +51,10 @@ class RadarDisplay {
         this.observer = null;
         this.tracks = [];
         this.history = {};
+        // icao -> adsb-hub route (or null), sent only when it changes.
+        this.routes = {};
+        // The aircraft clicked on: its route is shown and drawn.
+        this.selected = null;
         // icao -> {n_number, manufacturer, model, owner}.  Static per aircraft,
         // so the server sends it once and later frames omit it.
         this.registry = {};
@@ -106,6 +110,9 @@ class RadarDisplay {
         // Canvas dimensions (must be after fadeCanvas creation)
         this.resize();
         window.addEventListener('resize', () => { this.resize(); this.updateMapView(); });
+        // Click an aircraft: its route (where it is going) in a box and on the
+        // scope. Click it again, or empty sky, to clear.
+        this.canvas.addEventListener('click', (e) => this.selectAt(e.clientX, e.clientY));
 
         const viewSel = document.getElementById('view-select');
         if (viewSel) {
@@ -463,6 +470,13 @@ class RadarDisplay {
             }
         }
 
+        // Routes, likewise: present when changed (null = none any more).
+        for (const t of this.tracks) {
+            if (t.route !== undefined) this.routes[t.icao] = t.route;
+            else t.route = this.routes[t.icao] || null;
+        }
+        this.updateInfo();
+
         // The server sends ONE full frame per connection and deltas after it.
         // Before this, every frame carried the complete history (591 KiB) and
         // facilities (62 KiB) three times a second -- 16.6 Mbit/s per viewer.
@@ -720,6 +734,10 @@ class RadarDisplay {
                     this.drawTrail(track);
                 }
             }
+
+            // The selected aircraft's way to its destination, under the symbols.
+            const sel = this.selected && this.tracks.find(t => t.icao === this.selected);
+            if (sel) this.drawRoute(sel);
 
             // Draw aircraft (top layer)
             for (const track of this.tracks) {
@@ -1174,7 +1192,8 @@ class RadarDisplay {
         // Callsign above if available
         if (track.callsign) {
             ctx.textBaseline = 'bottom';
-            text(track.callsign, xOffset, yOffset - 2);
+            const rl = this.routeLabel(track.route);
+            text(rl ? `${track.callsign} ${rl}` : track.callsign, xOffset, yOffset - 2);
         }
 
         ctx.restore();
@@ -1227,6 +1246,106 @@ class RadarDisplay {
             x: startX + t * ndx,
             y: startY + t * ndy
         };
+    }
+
+    // ── routes (adsb-hub `route`) ─────────────────────────────────────────
+    // A route is the FAA's FILED plan (src "swim") or an airline-schedule
+    // guess (adsb.im / adsbdb). The hub checks each against the aircraft's
+    // position and track; one that does not fit (`plausible: false`) is never
+    // shown as fact -- only in the info box, marked as not fitting.
+
+    apCode(a, code) {
+        if (a && a.iata) return a.iata;
+        return code && code.length === 4 && code[0] === 'K' ? code.slice(1) : (code || '?');
+    }
+
+    routeLabel(r) {
+        if (!r || !r.plausible) return '';
+        const lbl = `${this.apCode(r.o, r.orig)}-${this.apCode(r.d, r.dest)}`;
+        return r.src === 'swim' ? lbl : lbl + '?';   // ? = schedule, not a filed plan
+    }
+
+    drawRoute(track) {
+        const r = track.route;
+        if (!r || !r.plausible || !r.d || track.lat === null) return;
+        const from = this.latLonToXY(track.lat, track.lon);
+        if (!from) return;
+        // Initial great-circle bearing to the destination; the flat projection
+        // cannot place a far airport, but it can point at it.
+        const toRad = Math.PI / 180;
+        const p1 = track.lat * toRad, p2 = r.d.lat * toRad;
+        const dl = (r.d.lon - track.lon) * toRad;
+        const brg = Math.atan2(Math.sin(dl) * Math.cos(p2),
+                               Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl));
+        const distNM = 3440.065 * Math.acos(Math.min(1, Math.sin(p1) * Math.sin(p2)
+                                            + Math.cos(p1) * Math.cos(p2) * Math.cos(dl)));
+        const span = Math.max(this.canvas.width, this.canvas.height);
+        const lenPx = Math.min(distNM * this.pixelsPerNM, span * 2);
+        let end = { x: from.x + Math.sin(brg) * lenPx, y: from.y - Math.cos(brg) * lenPx };
+        end = this.clipLineToCircle(from.x, from.y, end.x, end.y);
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.strokeStyle = MAP_LABEL_COLOR;
+        ctx.globalAlpha = 0.8;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 5]);
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(end.x, end.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Selection ring.
+        ctx.beginPath();
+        ctx.arc(from.x, from.y, 16, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    selectAt(clientX, clientY) {
+        const rect = this.canvas.getBoundingClientRect();
+        const x = clientX - rect.left - this.cx, y = clientY - rect.top - this.cy;
+        let best = null, bestD = 22;                       // px
+        for (const t of this.tracks) {
+            if (t.lat === null) continue;
+            const p = this.latLonToXY(t.lat, t.lon);
+            if (!p) continue;
+            const d = Math.hypot(p.x - x, p.y - y);
+            if (d < bestD) { best = t; bestD = d; }
+        }
+        this.selected = best ? (best.icao === this.selected ? null : best.icao) : null;
+        this.updateInfo();
+    }
+
+    updateInfo() {
+        const box = document.getElementById('ac-info');
+        if (!box) return;
+        const t = this.selected && this.tracks.find(x => x.icao === this.selected);
+        if (!t) { box.hidden = true; return; }
+        const esc = (v) => String(v ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+        const ap = (a, code) => a ? `${esc(this.apCode(a, code))} ${esc(a.name || '')}${a.city ? ' (' + esc(a.city) + ')' : ''}` : esc(code);
+        const lines = [`<b>${esc(t.callsign || t.icao)}</b> ${esc(t.n_number || '')} ${esc(this.formatAircraftType(t))}`];
+        const r = t.route;
+        if (!r) {
+            lines.push('No route known.');
+        } else {
+            const what = r.src === 'swim' ? 'FAA filed plan' : `airline schedule (${esc(r.src)})`;
+            if (r.plausible) {
+                lines.push(`From ${ap(r.o, r.orig)}`, `To ${ap(r.d, r.dest)}`, what);
+            } else {
+                lines.push(`<span class="dim">${what} says ${esc(r.orig)} → ${esc(r.dest)}, ` +
+                           `but that does not fit this aircraft's track.</span>`);
+            }
+            const extra = [];
+            if (r.status) extra.push(esc(r.status.toLowerCase()));
+            if (r.type) extra.push(esc(r.type));
+            if (r.eta) {
+                const d = new Date(r.eta);
+                if (!isNaN(d)) extra.push('ETA ' + d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}));
+            }
+            if (extra.length) lines.push(extra.join(' · '));
+        }
+        box.innerHTML = lines.join('<br>');
+        box.hidden = false;
     }
 
     formatAircraftType(track) {

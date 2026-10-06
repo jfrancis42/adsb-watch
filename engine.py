@@ -61,6 +61,10 @@ class Aircraft:
     model:        Optional[str] = None
     owner:        Optional[str] = None
     registry_checked: bool = False
+    # Where it is going, from adsb-hub: the FAA's filed plan or a schedule
+    # guess, with `plausible` (does it fit the track). Identity, like the
+    # callsign: accepted from any source.
+    route: Optional[dict] = None
 
 
 @dataclass
@@ -119,6 +123,7 @@ class Track:
     manufacturer: Optional[str] = None
     model:        Optional[str] = None
     owner:        Optional[str] = None
+    route:        Optional[dict] = None   # adsb-hub `route` (+ airports o/d)
 
 
 @dataclass
@@ -297,7 +302,8 @@ class Engine:
                         alt_ft=None, course_deg=None, speed_kt=None,
                         vrate_fpm=None, source: str = 'local',
                         pos_time: float | None = None,
-                        fix_time: float | None = None):
+                        fix_time: float | None = None,
+                        route: dict | None = None):
         """Merge an aircraft update.
 
         `source` is 'local' (RTL-SDR: SBS/AVR/UAT feeders) or 'internet'
@@ -330,6 +336,8 @@ class Engine:
             # position priority.
             if callsign is not None:
                 ac.callsign = callsign.strip() or ac.callsign
+            if route is not None:
+                ac.route = route
 
             # Position priority: internet kinematic data is suppressed while a
             # local fix is still fresh. Local data is never suppressed.
@@ -509,7 +517,7 @@ class Engine:
             runway=ph.runway, phase_detail=ph.detail,
             age_s=now - a.last_seen,
             n_number=a.n_number, manufacturer=a.manufacturer,
-            model=a.model, owner=a.owner,
+            model=a.model, owner=a.owner, route=a.route,
         )
 
     def _smooth_cpa(self, a: Aircraft, now: float,

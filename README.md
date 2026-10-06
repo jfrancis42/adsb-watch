@@ -395,6 +395,17 @@ runway geometry of nearby airports:
 Tunable thresholds live at the top of `phase.py` (lateral tolerance,
 heading tolerance, AGL ceiling, vertical-rate gates).
 
+## Where an aircraft is going
+
+When the data comes from adsb-hub, an aircraft can carry a `route`: the FAA's
+filed flight plan, or an airline-schedule match, which the hub has checked
+against the aircraft's position and track. The web radar shows it after the
+callsign (`UAL1234 DEN-LAX`; a trailing `?` means a schedule match, not a
+filed plan). Click an aircraft for its origin, destination, source and ETA, and
+a dashed line toward its destination; click again, or empty sky, to clear. A
+route that does not fit the aircraft is never shown as fact -- only in that
+box, marked as not fitting.
+
 ## Caching
 
 All slow lookups are cached on disk (default 7 days, override with `--cache-ttl-days`):

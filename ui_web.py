@@ -296,6 +296,7 @@ class RadarServer:
         self.purged_since_broadcast = set()   # icaos dropped by _prune_history
         self.facilities_sig = None       # so static facilities are sent only on change
         self.announced_registry = set()  # icaos whose static registry data has been sent
+        self.route_sent = {}             # icao -> the route last sent (sent only on change)
 
     async def handler(self, websocket):
         """Handle a single WebSocket connection."""
@@ -311,6 +312,7 @@ class RadarServer:
         # tracks in a 30 s window.  Clearing costs one slightly larger frame
         # per connect (~8 KiB) and makes the omission impossible.
         self.announced_registry.clear()
+        self.route_sent.clear()          # same reasoning: a late joiner needs every route
         if self.viewer_gate is not None:
             self.viewer_gate.add()
         print(f"Client connected: {websocket.remote_address}")
@@ -411,6 +413,7 @@ class RadarServer:
                     # server must describe it again -- otherwise it returns
                     # permanently nameless.  This also bounds the set.
                     self.announced_registry.discard(icao)
+                    self.route_sent.pop(icao, None)
 
     def _update_history(self, snapshot):
         """Add current aircraft positions to history."""
@@ -514,6 +517,12 @@ class RadarServer:
                 d['model'] = t.model
                 d['owner'] = t.owner
                 self.announced_registry.add(t.icao)
+            # Route: sent when it changes (a filed plan amended, a guess
+            # replaced by the filed plan), not four times a second. null =
+            # no route any more.
+            if full or self.route_sent.get(t.icao, 0) != t.route:
+                d['route'] = t.route
+                self.route_sent[t.icao] = t.route
             tracks.append(d)
 
         message = {

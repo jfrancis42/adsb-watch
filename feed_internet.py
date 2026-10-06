@@ -104,7 +104,40 @@ def _fetch_hub(url: str, lat: float, lon: float, radius_nm: float,
     which makes it poll the internet every 2 s instead of 5."""
     q = urllib.parse.urlencode({'lat': lat, 'lon': lon, 'nm': radius_nm, 'live': 1})
     data = _get_json(f'{url}?{q}', timeout)
-    return _stamp(data.get('aircraft') or [], data.get('now')), data.get('feed') or {}
+    aircraft = data.get('aircraft') or []
+    _attach_airports(aircraft, data.get('airports') or {})
+    return _stamp(aircraft, data.get('now')), data.get('feed') or {}
+
+
+#: What the radar needs of an airport named by a route.
+_AP_KEYS = ('icao', 'iata', 'name', 'city', 'lat', 'lon')
+
+
+def _attach_airports(aircraft: list[dict], airports: dict) -> None:
+    """The hub names a route's airports by code and describes them once, in
+    the answer's top-level ``airports``; give each route its two airports."""
+    for ac in aircraft:
+        r = ac.get('route')
+        if not isinstance(r, dict):
+            continue
+        for end, key in (('o', 'orig'), ('d', 'dest')):
+            a = airports.get(r.get(key))
+            if isinstance(a, dict):
+                r[end] = {k: a[k] for k in _AP_KEYS if a.get(k) is not None}
+
+
+#: The route fields the radar shows (see adsb-hub README: `route`).
+_ROUTE_KEYS = ('orig', 'dest', 'plausible', 'src', 'status', 'eta', 'type', 'o', 'd')
+
+
+def route_of(ac: dict) -> dict | None:
+    """adsb-hub's ``route`` -- where the aircraft is going: the FAA's filed
+    plan (src ``swim``) or a schedule guess (``adsb.im``/``adsbdb``), checked
+    by the hub against the aircraft's track (``plausible``)."""
+    r = ac.get('route')
+    if not isinstance(r, dict) or not r.get('orig') or not r.get('dest'):
+        return None
+    return {k: r[k] for k in _ROUTE_KEYS if k in r}
 
 
 def _hub_projected(ac: dict) -> dict:
@@ -242,6 +275,9 @@ def canonical_to_kwargs(ac: dict):
     vr_n = _num(vr) if vr is not None else _num(ac.get('geom_rate'))
     if vr_n is not None:
         kw['vrate_fpm'] = vr_n
+    route = route_of(ac)
+    if route is not None:
+        kw['route'] = route
 
     return hex_id, kw
 
