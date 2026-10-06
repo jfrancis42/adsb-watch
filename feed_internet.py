@@ -427,7 +427,11 @@ class InternetFeeder(threading.Thread):
                 self.engine.report_feeder(self.name_id, f'{self.label}: {fb}')
             try:
                 aircraft = self._fetch(lat, lon, radius)
-                if self.recorder is not None:
+                # Not hub reads: four a second of the hub's whole picture is
+                # ~10 GB a day (9.9 GB in 16 h on 2026-10-05/06, the I/O load
+                # on pods), and it is not raw reception -- adsb-hub and
+                # adsb-log already hold it. Direct aggregator polls are kept.
+                if self.recorder is not None and self.label != 'adsb-hub':
                     self.recorder.log(self.name_id, json.dumps({'ac': aircraft}))
                 n = self._ingest(aircraft)
                 self.engine.bump_count(self.name_id, n)
