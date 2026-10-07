@@ -257,6 +257,65 @@ class CenterControl:
         return None
 
 
+class WxProxy:
+    """adsb-hub's /wx, passed through to browsers (public viewers cannot reach
+    the hub) with a short cache, and WATCHED: every WATCH_S the index (each
+    product's timestamp) is read, changed products are dropped from the cache
+    and reported, so viewers refetch only those, seconds after the hub has
+    them -- a new radar frame, a new TFR -- instead of on a timer."""
+
+    CACHE_S = 60.0
+    WATCH_S = 15.0
+
+    def __init__(self, hub_base: str):
+        self.base = hub_base.rstrip('/')
+        self.cache = {}
+        self.lock = threading.Lock()
+        self.seen = {}
+
+    def get(self, path: str):
+        now = time.time()
+        with self.lock:
+            hit = self.cache.get(path)
+        if hit and now - hit[0] < self.CACHE_S:
+            return hit[1]
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=10) as r:
+                got = (r.status, r.headers.get('Content-Type', 'application/json'), r.read())
+        except urllib.error.HTTPError as e:
+            got = (e.code, 'application/json', e.read() or b'{}')
+        except Exception as e:                # noqa: BLE001 -- the hub is down
+            got = (502, 'application/json', json.dumps({'error': type(e).__name__}).encode())
+        with self.lock:
+            self.cache[path] = (now, got)
+        return got
+
+    def changed(self) -> list:
+        """Products whose timestamp moved since the last call (first call:
+        none -- a client loads everything when it turns weather on)."""
+        try:
+            with urllib.request.urlopen(self.base + '/wx', timeout=10) as r:
+                idx = json.load(r)
+        except Exception:                     # noqa: BLE001
+            return []
+        out = []
+        for name, p in (idx.get('products') or {}).items():
+            t = p.get('t')
+            if t is None:
+                continue
+            if name in self.seen and self.seen[name] != t:
+                out.append(name)
+            self.seen[name] = t
+        if out:
+            with self.lock:
+                for name in out:
+                    self.cache.pop(f'/wx/{name}', None)
+                    if name == 'radar':
+                        self.cache.pop('/wx/radar.png', None)
+                self.cache.pop('/wx', None)
+        return out
+
+
 class RadarServer:
     """WebSocket server that broadcasts engine snapshots to all connected clients."""
 
@@ -301,6 +360,8 @@ class RadarServer:
         self.announced_registry = set()  # icaos whose static registry data has been sent
         self.route_sent = {}             # icao -> the route last sent (sent only on change)
         self.filed_cache = {}            # TFMS ref -> (fetched at, filed waypoints reply)
+        from feed_internet import _HUB_URL
+        self.wx = WxProxy(_HUB_URL.rsplit('/', 1)[0])
 
     async def handler(self, websocket):
         """Handle a single WebSocket connection."""
@@ -637,6 +698,16 @@ class RadarServer:
         """Send the complete current state to a single client (on connect)."""
         await websocket.send(self._build_message(full=True))
 
+    async def wx_watch_loop(self):
+        """Tell viewers which weather products changed, as soon as the hub
+        has them: {"type": "wx_changed", "products": [...]}."""
+        while True:
+            changed = await asyncio.to_thread(self.wx.changed)
+            if changed and self.clients:
+                websockets.broadcast(self.clients, json.dumps({'type': 'wx_changed',
+                                                               'products': changed}))
+            await asyncio.sleep(self.wx.WATCH_S)
+
     async def broadcast_loop(self):
         """Periodically broadcast to all connected clients."""
         interval = 1.0 / self.refresh_hz
@@ -681,7 +752,11 @@ class RadarServer:
         """Start the WebSocket server and broadcast loop."""
         async with websockets.serve(self.handler, "0.0.0.0", self.port):
             print(f"WebSocket server listening on ws://0.0.0.0:{self.port}")
-            await self.broadcast_loop()
+            watcher = asyncio.create_task(self.wx_watch_loop())
+            try:
+                await self.broadcast_loop()
+            finally:
+                watcher.cancel()
 
 
 def run(engine, refresh_hz: float = 4.0, port: int = 8765, http_port: int = 8080,
@@ -702,33 +777,7 @@ def run(engine, refresh_hz: float = 4.0, port: int = 8765, http_port: int = 8080
     web_dir = os.path.join(os.path.dirname(__file__), 'web')
     os.makedirs(web_dir, exist_ok=True)
 
-    # Weather (adsb-hub /wx): the browser cannot reach the hub (public
-    # viewers are outside the LAN), so this server passes /wx/* through,
-    # cached WX_CACHE_S per path -- many viewers cost the hub one request a
-    # minute per product.
-    from feed_internet import _HUB_URL
-    hub_base = _HUB_URL.rsplit('/', 1)[0]
-    wx_cache = {}
-    wx_lock = threading.Lock()
-    WX_CACHE_S = 60.0
-
-    def wx_fetch(path):
-        now = time.time()
-        with wx_lock:
-            hit = wx_cache.get(path)
-        if hit and now - hit[0] < WX_CACHE_S:
-            return hit[1]
-        try:
-            with urllib.request.urlopen(hub_base + path, timeout=10) as r:
-                got = (r.status, r.headers.get('Content-Type', 'application/json'), r.read())
-        except urllib.error.HTTPError as e:
-            got = (e.code, 'application/json', e.read() or b'{}')
-        except Exception as e:                # noqa: BLE001 -- the hub is down
-            got = (502, 'application/json', json.dumps({'error': type(e).__name__}).encode())
-        with wx_lock:
-            wx_cache[path] = (now, got)
-        return got
-
+    wx_proxy = server.wx
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=web_dir, **kwargs)
@@ -739,7 +788,7 @@ def run(engine, refresh_hz: float = 4.0, port: int = 8765, http_port: int = 8080
                 if not re.fullmatch(r'/wx(/[a-z]+(\.png)?)?', path):
                     self.send_error(404)
                     return
-                code, ctype, body = wx_fetch(path)
+                code, ctype, body = wx_proxy.get(path)
                 self.send_response(code)
                 self.send_header('Content-Type', ctype)
                 self.send_header('Content-Length', str(len(body)))

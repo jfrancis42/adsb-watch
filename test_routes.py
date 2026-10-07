@@ -84,5 +84,26 @@ class Filed(unittest.TestCase):
         self.assertEqual(kw["route"]["ref"], "123")
 
 
+class WxPush(unittest.TestCase):
+
+    def test_changed_products_are_reported_once_and_uncached(self):
+        import io
+        from unittest import mock
+        w = ui_web.WxProxy("http://hub")
+        idx = {"products": {"radar": {"t": 1.0}, "tfr": {"t": 5.0}}}
+
+        def fake(url, timeout=10):
+            return io.BytesIO(json.dumps(idx).encode())
+        with mock.patch("urllib.request.urlopen", fake):
+            self.assertEqual(w.changed(), [], "first look: nothing to report")
+            w.cache["/wx/radar.png"] = (1e12, (200, "image/png", b"old"))
+            w.cache["/wx/tfr"] = (1e12, (200, "application/json", b"{}"))
+            idx["products"]["radar"]["t"] = 2.0
+            self.assertEqual(w.changed(), ["radar"])
+            self.assertNotIn("/wx/radar.png", w.cache, "the new frame is fetched, not the cached one")
+            self.assertIn("/wx/tfr", w.cache)
+            self.assertEqual(w.changed(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -278,6 +278,8 @@ class RadarDisplay {
                 this.overlay = data.overlay;
             } else if (data.type === 'center_result') {
                 this.handleCenterResult(data);
+            } else if (data.type === 'wx_changed') {
+                if (this.wxOn) this.loadWeather(data.products || []);
             } else if (data.type === 'filed') {
                 this.filed[data.ref] = {wp: data.wp || [], route: data.route || null,
                                         wpSrc: data.wp_src || null, at: Date.now()};
@@ -726,6 +728,18 @@ class RadarDisplay {
             this.ctx.shadowBlur = 0;
         }
 
+        // MAP ELEMENTS FIRST, the radar's own picture ALWAYS on top of them
+        // (owner's rule, 2026-10-06): weather and the KML overlay go down
+        // here, then the range rings, airports, runways, trails, routes and
+        // aircraft over them.
+        if (this.observer && (this.wxOn || this.overlay)) {
+            this.ctx.save();
+            this.ctx.translate(this.cx, this.cy);
+            if (this.wxOn) this.drawWeather();
+            if (this.overlay) this.drawOverlay(this.overlay);
+            this.ctx.restore();
+        }
+
         // Draw persistent grid and labels (drawn every frame, not faded)
         this.drawGrid();
 
@@ -734,14 +748,6 @@ class RadarDisplay {
         this.ctx.translate(this.cx, this.cy);
 
         if (this.observer) {
-            // Draw KML overlay first (bottom-most layer, under airports)
-            if (this.overlay) {
-                this.drawOverlay(this.overlay);
-            }
-
-            // Weather under everything else it would hide
-            if (this.wxOn) this.drawWeather();
-
             // Draw airports and runways first (bottom layer)
             if (this.facilities && this.facilities.airports) {
                 for (const airport of this.facilities.airports) {
@@ -1457,19 +1463,25 @@ class RadarDisplay {
         clearInterval(this.wxTimer);
         if (on) {
             this.loadWeather();
-            this.wxTimer = setInterval(() => this.loadWeather(), 60000);
+            // Changes are PUSHED (wx_changed); this slow poll only covers a
+            // missed push or a reconnect.
+            this.wxTimer = setInterval(() => this.loadWeather(), 300000);
         } else {
             this.wxSelected = null;
             this.updateInfo();
         }
     }
 
-    async loadWeather() {
+    // `only`: the products the server just said changed (pushed over the
+    // websocket the moment the hub has them); none = everything.
+    async loadWeather(only) {
         const get = async (p) => {
             try { const r = await fetch(`/wx/${p}`, {cache: 'no-cache'}); return r.ok ? await r.json() : null; }
             catch (e) { return null; }
         };
-        const names = ['metar', 'taf', 'tfr', 'sigmet', 'airmet', 'pirep', 'radar'];
+        const all = ['metar', 'taf', 'tfr', 'sigmet', 'airmet', 'pirep', 'radar'];
+        const names = only && only.length ? all.filter(n => only.includes(n)) : all;
+        if (!names.length) return;
         const got = await Promise.all(names.map(get));
         names.forEach((n, i) => { if (got[i]) this.wx[n] = got[i]; });
         const rd = this.wx.radar;
@@ -1501,6 +1513,7 @@ class RadarDisplay {
     drawWeather() {
         const ctx = this.ctx;
         ctx.save();
+        ctx.shadowBlur = 0;                      // no phosphor halo on map data
         if (this.viewMode === 'radar') {
             ctx.beginPath();
             ctx.arc(0, 0, this.radius, 0, Math.PI * 2);

@@ -419,8 +419,21 @@ TFRs (red, dashed), SIGMETs (orange), G-AIRMETs (yellow, dashed) and PIREPs
 (diamonds, red when urgent). Click a station for its METAR and TAF, a PIREP for
 its text, or anywhere inside a TFR / SIGMET / AIRMET for what covers that point.
 Every product says where it came from (internet, or FIS-B over 978 MHz) and
-how old it is. The browser gets it through this server's `/wx/*`, which passes
-adsb-hub's `/wx` through with a one-minute cache. Informational, not for flight.
+how old it is. Informational, not for flight.
+
+**It updates by itself.** The server reads adsb-hub's `/wx` index every 15 s;
+when a product changes (a new radar frame, a new TFR) it drops its cached
+copy and pushes `{"type": "wx_changed", "products": [...]}` over the
+WebSocket, and the page refetches only those. A 5-minute poll covers a missed
+push.
+
+**Layering:** map data -- the weather and the KML overlay -- is drawn first;
+the range rings, airports, runways, trails, routes and aircraft always go on
+top of it.
+
+For other programs: the page's server exposes the same data at `/wx`,
+`/wx/<product>` and `/wx/radar.png` (adsb-hub's schema, cached a minute) --
+use adsb-hub's `/wx` directly where you can reach it.
 
 ## Caching
 
