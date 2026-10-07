@@ -32,7 +32,6 @@ class Routes(unittest.TestCase):
         r = kw["route"]
         self.assertEqual((r["orig"], r["dest"], r["src"], r["plausible"]), ("KDEN", "KLAX", "swim", True))
         self.assertEqual(r["d"]["iata"], "LAX")
-        self.assertNotIn("ref", r)
 
     def test_no_route_no_kwarg(self):
         _, kw = F.canonical_to_kwargs({"hex": "a1b2c3", "lat": 1.0, "lon": 2.0})
@@ -52,6 +51,37 @@ class Routes(unittest.TestCase):
         e.update_aircraft(icao, source="internet", **kw)
         delta = json.loads(s._build_message(full=False))
         self.assertEqual(delta["tracks"][0]["route"]["dest"], "KSFO")
+
+
+class Filed(unittest.TestCase):
+
+    def test_filed_request_is_answered_from_the_hub_and_cached(self):
+        import asyncio
+        s = ui_web.RadarServer(Engine())
+        calls = []
+
+        def fake(ref):
+            calls.append(ref)
+            return {"ref": ref, "wp": [[39.8, -104.6], [33.9, -118.4]], "route": "KDEN..KLAX"}
+        s._fetch_filed = fake
+        sent = []
+
+        class WS:
+            async def send(self, m):
+                sent.append(json.loads(m))
+        ws = WS()
+        asyncio.run(s._handle_filed(ws, json.dumps({"cmd": "filed", "ref": "159141703"})))
+        self.assertEqual(sent[0]["type"], "filed")
+        self.assertEqual(sent[0]["wp"][1], [33.9, -118.4])
+        # junk refs are swallowed, never fetched
+        self.assertTrue(asyncio.run(s._handle_filed(ws, json.dumps({"cmd": "filed", "ref": "../x"}))))
+        self.assertEqual(calls, ["159141703"])
+        # not a filed message: left for the other handlers
+        self.assertFalse(asyncio.run(s._handle_filed(ws, json.dumps({"cmd": "set_coverage"}))))
+
+    def test_route_ref_reaches_the_browser(self):
+        _, kw = F.canonical_to_kwargs(hub_aircraft())
+        self.assertEqual(kw["route"]["ref"], "123")
 
 
 if __name__ == "__main__":

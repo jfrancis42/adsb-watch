@@ -55,6 +55,10 @@ class RadarDisplay {
         this.routes = {};
         // The aircraft clicked on: its route is shown and drawn.
         this.selected = null;
+        // TFMS ref -> {wp: [[lat, lon]...], route: "<filed route string>"},
+        // fetched through the server when an aircraft with a filed plan is
+        // clicked. Empty wp: the plan was filed before the relay saw it.
+        this.filed = {};
         // icao -> {n_number, manufacturer, model, owner}.  Static per aircraft,
         // so the server sends it once and later frames omit it.
         this.registry = {};
@@ -264,6 +268,9 @@ class RadarDisplay {
                 this.overlay = data.overlay;
             } else if (data.type === 'center_result') {
                 this.handleCenterResult(data);
+            } else if (data.type === 'filed') {
+                this.filed[data.ref] = {wp: data.wp || [], route: data.route || null};
+                this.updateInfo();
             }
         };
     }
@@ -1265,9 +1272,65 @@ class RadarDisplay {
         return r.src === 'swim' ? lbl : lbl + '?';   // ? = schedule, not a filed plan
     }
 
+    requestFiled(r) {
+        // Ask once per ref (a reconnect clears nothing: refs are stable).
+        if (!r || r.src !== 'swim' || !r.ref) return;
+        const have = this.filed[r.ref];
+        // An answer is kept; a request unanswered for 10 s (a reconnect ate
+        // it) is asked again.
+        if (have && (!have.pending || Date.now() - have.pending < 10000)) return;
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        this.filed[r.ref] = { pending: Date.now() };
+        try { this.ws.send(JSON.stringify({ cmd: 'filed', ref: r.ref })); } catch (e) { /* retried */ }
+    }
+
+    // The FILED route, waypoint by waypoint: the line the flight plan says it
+    // will fly. Drawn under everything else, clipped to the scope in RADAR.
+    drawFiled(track, wp) {
+        const ctx = this.ctx;
+        ctx.save();
+        if (this.viewMode === 'radar') {
+            ctx.beginPath();
+            ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+            ctx.clip();
+        }
+        ctx.strokeStyle = MAP_LABEL_COLOR;
+        ctx.fillStyle = MAP_LABEL_COLOR;
+        ctx.globalAlpha = 0.75;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        let started = false;
+        const pts = [];
+        for (const [lat, lon] of wp) {
+            const p = this.latLonToXY(lat, lon);
+            if (!p) continue;
+            pts.push(p);
+            if (!started) { ctx.moveTo(p.x, p.y); started = true; } else ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        for (const p of pts) {                       // the waypoints themselves
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        // Selection ring on the aircraft.
+        const a = this.latLonToXY(track.lat, track.lon);
+        if (a) {
+            ctx.globalAlpha = 0.9;
+            ctx.beginPath();
+            ctx.arc(a.x, a.y, 16, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+
     drawRoute(track) {
         const r = track.route;
         if (!r || !r.plausible || !r.d || track.lat === null) return;
+        const f = r.ref ? this.filed[r.ref] : null;
+        if (f && !f.pending && f.wp && f.wp.length >= 2) { this.drawFiled(track, f.wp); return; }
         const from = this.latLonToXY(track.lat, track.lon);
         if (!from) return;
         // Initial great-circle bearing to the destination; the flat projection
@@ -1313,6 +1376,7 @@ class RadarDisplay {
             if (d < bestD) { best = t; bestD = d; }
         }
         this.selected = best ? (best.icao === this.selected ? null : best.icao) : null;
+        if (best && this.selected) this.requestFiled(best.route);
         this.updateInfo();
     }
 
@@ -1325,6 +1389,7 @@ class RadarDisplay {
         const ap = (a, code) => a ? `${esc(this.apCode(a, code))} ${esc(a.name || '')}${a.city ? ' (' + esc(a.city) + ')' : ''}` : esc(code);
         const lines = [`<b>${esc(t.callsign || t.icao)}</b> ${esc(t.n_number || '')} ${esc(this.formatAircraftType(t))}`];
         const r = t.route;
+        this.requestFiled(r);              // the route may have gained a filed plan since the click
         if (!r) {
             lines.push('No route known.');
         } else {
@@ -1343,6 +1408,15 @@ class RadarDisplay {
                 if (!isNaN(d)) extra.push('ETA ' + d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}));
             }
             if (extra.length) lines.push(extra.join(' · '));
+            const f = r.ref ? this.filed[r.ref] : undefined;
+            if (r.src === 'swim' && r.ref) {
+                if (!f || f.pending) lines.push('<span class="dim">filed route: loading…</span>');
+                else {
+                    if (f.route) lines.push(`<span class="dim">${esc(f.route)}</span>`);
+                    if (!f.wp || f.wp.length < 2)
+                        lines.push('<span class="dim">no filed waypoints (plan filed before the relay saw it): line shows direction only</span>');
+                }
+            }
         }
         box.innerHTML = lines.join('<br>');
         box.hidden = false;

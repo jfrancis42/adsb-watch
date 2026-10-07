@@ -401,8 +401,12 @@ When the data comes from adsb-hub, an aircraft can carry a `route`: the FAA's
 filed flight plan, or an airline-schedule match, which the hub has checked
 against the aircraft's position and track. The web radar shows it after the
 callsign (`UAL1234 DEN-LAX`; a trailing `?` means a schedule match, not a
-filed plan). Click an aircraft for its origin, destination, source and ETA, and
-a dashed line toward its destination; click again, or empty sky, to clear. A
+filed plan). Click an aircraft for its origin, destination, source and ETA. With a FAA
+filed plan, the radar asks the server for the plan's waypoints (the server
+fetches them from adsb-hub, which public viewers cannot reach) and draws the
+filed route, waypoint by waypoint; otherwise a dashed line points toward the
+destination. Click again, or empty sky, to clear. A plan filed before the hub's
+relay saw it has no waypoints, and says so. A
 route that does not fit the aircraft is never shown as fact -- only in that
 box, marked as not fitting.
 

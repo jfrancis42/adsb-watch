@@ -6,8 +6,10 @@ Each snapshot includes current aircraft state plus 30s of position history for t
 """
 import asyncio
 import json
+import re
 import time
 import threading
+import urllib.request
 from dataclasses import asdict
 from typing import Callable, Optional
 try:
@@ -297,6 +299,7 @@ class RadarServer:
         self.facilities_sig = None       # so static facilities are sent only on change
         self.announced_registry = set()  # icaos whose static registry data has been sent
         self.route_sent = {}             # icao -> the route last sent (sent only on change)
+        self.filed_cache = {}            # TFMS ref -> (fetched at, filed waypoints reply)
 
     async def handler(self, websocket):
         """Handle a single WebSocket connection."""
@@ -331,6 +334,8 @@ class RadarServer:
                 # would otherwise answer a window drag with "Slow down".
                 if self._handle_coverage(websocket, message):
                     continue
+                if await self._handle_filed(websocket, message):
+                    continue
                 now = time.time()
                 if now - last_cmd_at < CenterControl.COOLDOWN_S:
                     # Answer rather than drop: a swallowed command is a text
@@ -352,6 +357,61 @@ class RadarServer:
                 self.coverage.remove(websocket)
             if self.viewer_gate is not None:
                 self.viewer_gate.remove()
+
+    # -- filed routes ---------------------------------------------------- #
+    # A viewer that clicks an aircraft with an FAA filed plan asks for its
+    # waypoints: {"cmd": "filed", "ref": "<TFMS flightRef>"}. The browser
+    # cannot reach adsb-hub (public viewers are outside the LAN), so the
+    # server fetches /swim/flight/<ref> from the hub and answers
+    # {"type": "filed", "ref", "wp": [[lat, lon]...], "route": "<string>"}.
+    # Cached a minute per ref: several viewers clicking the same aircraft
+    # cost the hub one request.
+    FILED_TTL_S = 60.0
+
+    def _filed_url(self, ref: str) -> str:
+        from feed_internet import _HUB_URL
+        return _HUB_URL.rsplit('/', 1)[0] + f'/swim/flight/{ref}'
+
+    def _fetch_filed(self, ref: str) -> dict:
+        now = time.time()
+        hit = self.filed_cache.get(ref)
+        if hit and now - hit[0] < self.FILED_TTL_S:
+            return hit[1]
+        out = {'ref': ref, 'wp': [], 'route': None}
+        try:
+            with urllib.request.urlopen(self._filed_url(ref), timeout=5) as r:
+                fl = (json.load(r).get('flights') or [])
+            if fl:
+                out['wp'] = [p for p in (fl[0].get('wp') or [])
+                             if isinstance(p, list) and len(p) == 2][:2000]
+                out['route'] = fl[0].get('route')
+        except Exception as exc:          # noqa: BLE001 -- answer empty, never stall
+            out['error'] = type(exc).__name__
+        self.filed_cache[ref] = (now, out)
+        if len(self.filed_cache) > 500:
+            for k in sorted(self.filed_cache, key=lambda k: self.filed_cache[k][0])[:250]:
+                self.filed_cache.pop(k, None)
+        return out
+
+    async def _handle_filed(self, websocket, message) -> bool:
+        """Consume a ``filed`` request. True if it was one."""
+        if '"filed"' not in message:          # cheap pre-check, no parse
+            return False
+        try:
+            msg = json.loads(message)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(msg, dict) or msg.get('cmd') != 'filed':
+            return False
+        ref = str(msg.get('ref') or '')
+        if not re.fullmatch(r'[0-9]{1,15}', ref):   # TFMS flightRefs are digits
+            return True
+        reply = await asyncio.to_thread(self._fetch_filed, ref)
+        try:
+            await websocket.send(json.dumps({'type': 'filed', **reply}))
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        return True
 
     def _handle_coverage(self, websocket, message) -> bool:
         """Consume a ``set_coverage`` message. True if it was one."""

@@ -127,7 +127,7 @@ def _attach_airports(aircraft: list[dict], airports: dict) -> None:
 
 
 #: The route fields the radar shows (see adsb-hub README: `route`).
-_ROUTE_KEYS = ('orig', 'dest', 'plausible', 'src', 'status', 'eta', 'type', 'o', 'd')
+_ROUTE_KEYS = ('orig', 'dest', 'plausible', 'src', 'status', 'eta', 'type', 'o', 'd', 'ref')
 
 
 def route_of(ac: dict) -> dict | None:
