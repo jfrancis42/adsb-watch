@@ -74,6 +74,21 @@
             cursor: pointer;
         }
 
+        #wx-toggle {
+            background: #001100;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 2px 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        #wx-toggle.on {
+            background: #0f0;
+            color: #001100;
+            box-shadow: 0 0 5px #0f0;
+        }
+
         select:focus {
             outline: none;
             box-shadow: 0 0 3px #0f0;
@@ -316,6 +331,9 @@
                 <span id="center-msg"></span>
             </div>
             <div class="right">
+                <span>
+                    <button id="wx-toggle" type="button" title="Weather: radar, METARs, TFRs, SIGMETs/AIRMETs, PIREPs">WX: OFF</button>
+                </span>
                 <span>
                     View:
                     <select id="view-select">

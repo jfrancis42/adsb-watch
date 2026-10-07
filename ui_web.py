@@ -9,6 +9,7 @@ import json
 import re
 import time
 import threading
+import urllib.error
 import urllib.request
 from dataclasses import asdict
 from typing import Callable, Optional
@@ -701,9 +702,52 @@ def run(engine, refresh_hz: float = 4.0, port: int = 8765, http_port: int = 8080
     web_dir = os.path.join(os.path.dirname(__file__), 'web')
     os.makedirs(web_dir, exist_ok=True)
 
+    # Weather (adsb-hub /wx): the browser cannot reach the hub (public
+    # viewers are outside the LAN), so this server passes /wx/* through,
+    # cached WX_CACHE_S per path -- many viewers cost the hub one request a
+    # minute per product.
+    from feed_internet import _HUB_URL
+    hub_base = _HUB_URL.rsplit('/', 1)[0]
+    wx_cache = {}
+    wx_lock = threading.Lock()
+    WX_CACHE_S = 60.0
+
+    def wx_fetch(path):
+        now = time.time()
+        with wx_lock:
+            hit = wx_cache.get(path)
+        if hit and now - hit[0] < WX_CACHE_S:
+            return hit[1]
+        try:
+            with urllib.request.urlopen(hub_base + path, timeout=10) as r:
+                got = (r.status, r.headers.get('Content-Type', 'application/json'), r.read())
+        except urllib.error.HTTPError as e:
+            got = (e.code, 'application/json', e.read() or b'{}')
+        except Exception as e:                # noqa: BLE001 -- the hub is down
+            got = (502, 'application/json', json.dumps({'error': type(e).__name__}).encode())
+        with wx_lock:
+            wx_cache[path] = (now, got)
+        return got
+
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=web_dir, **kwargs)
+
+        def do_GET(self):
+            path = self.path.split('?', 1)[0]
+            if path == '/wx' or path.startswith('/wx/'):
+                if not re.fullmatch(r'/wx(/[a-z]+(\.png)?)?', path):
+                    self.send_error(404)
+                    return
+                code, ctype, body = wx_fetch(path)
+                self.send_response(code)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'max-age=60')
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            super().do_GET()
 
         def log_message(self, format, *args):
             pass  # Suppress HTTP logs

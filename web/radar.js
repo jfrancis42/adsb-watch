@@ -114,6 +114,16 @@ class RadarDisplay {
         // Canvas dimensions (must be after fadeCanvas creation)
         this.resize();
         window.addEventListener('resize', () => { this.resize(); this.updateMapView(); });
+        // Weather (adsb-hub /wx, through this page's server): off until the
+        // WX button turns it on; remembered per browser.
+        this.wx = {};
+        this.wxOn = false;
+        this.wxTimer = null;
+        try { this.wxOn = localStorage.getItem('adsb.wx') === 'on'; } catch (e) { /* private mode */ }
+        const wxBtn = document.getElementById('wx-toggle');
+        if (wxBtn) wxBtn.addEventListener('click', () => this.setWeather(!this.wxOn));
+        this.setWeather(this.wxOn);
+
         // Click an aircraft: its route (where it is going) in a box and on the
         // scope. Click it again, or empty sky, to clear.
         this.canvas.addEventListener('click', (e) => this.selectAt(e.clientX, e.clientY));
@@ -728,6 +738,9 @@ class RadarDisplay {
             if (this.overlay) {
                 this.drawOverlay(this.overlay);
             }
+
+            // Weather under everything else it would hide
+            if (this.wxOn) this.drawWeather();
 
             // Draw airports and runways first (bottom layer)
             if (this.facilities && this.facilities.airports) {
@@ -1382,6 +1395,7 @@ class RadarDisplay {
         }
         this.selected = best ? (best.icao === this.selected ? null : best.icao) : null;
         if (best && this.selected) this.requestFiled(best.route);
+        this.wxSelected = (!best && this.wxOn) ? this.wxAt(x, y) : null;
         this.updateInfo();
     }
 
@@ -1389,6 +1403,7 @@ class RadarDisplay {
         const box = document.getElementById('ac-info');
         if (!box) return;
         const t = this.selected && this.tracks.find(x => x.icao === this.selected);
+        if (!t && this.wxSelected) { box.innerHTML = this.wxSelected; box.hidden = false; return; }
         if (!t) { box.hidden = true; return; }
         const esc = (v) => String(v ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
         const ap = (a, code) => a ? `${esc(this.apCode(a, code))} ${esc(a.name || '')}${a.city ? ' (' + esc(a.city) + ')' : ''}` : esc(code);
@@ -1427,6 +1442,155 @@ class RadarDisplay {
         }
         box.innerHTML = lines.join('<br>');
         box.hidden = false;
+    }
+
+    // ── weather (adsb-hub /wx) ───────────────────────────────────────────
+    // Radar image, METAR dots by flight category, TFR / SIGMET / G-AIRMET
+    // outlines and PIREPs. Each product says where it came from (internet,
+    // or FIS-B over 978 MHz once the receiver hears it). NOT FOR FLIGHT.
+
+    setWeather(on) {
+        this.wxOn = on;
+        try { localStorage.setItem('adsb.wx', on ? 'on' : 'off'); } catch (e) { /* private mode */ }
+        const b = document.getElementById('wx-toggle');
+        if (b) { b.textContent = on ? 'WX: ON' : 'WX: OFF'; b.classList.toggle('on', on); }
+        clearInterval(this.wxTimer);
+        if (on) {
+            this.loadWeather();
+            this.wxTimer = setInterval(() => this.loadWeather(), 60000);
+        } else {
+            this.wxSelected = null;
+            this.updateInfo();
+        }
+    }
+
+    async loadWeather() {
+        const get = async (p) => {
+            try { const r = await fetch(`/wx/${p}`, {cache: 'no-cache'}); return r.ok ? await r.json() : null; }
+            catch (e) { return null; }
+        };
+        const names = ['metar', 'taf', 'tfr', 'sigmet', 'airmet', 'pirep', 'radar'];
+        const got = await Promise.all(names.map(get));
+        names.forEach((n, i) => { if (got[i]) this.wx[n] = got[i]; });
+        const rd = this.wx.radar;
+        if (rd && rd.bbox && rd.t !== this._radarT) {
+            const img = new Image();
+            img.onload = () => { this.wxRadarImg = img; this._radarT = rd.t; };
+            img.src = `/wx/radar.png?t=${Math.round(rd.t)}`;
+        }
+    }
+
+    _wxPath(ring) {
+        const ctx = this.ctx;
+        ctx.beginPath();
+        ring.forEach(([lon, lat], i) => {
+            const p = this.latLonToXY(lat, lon);
+            if (!p) return;
+            if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+        });
+        ctx.closePath();
+    }
+
+    _wxRings(f) {
+        const g = f.geometry || {};
+        if (g.type === 'Polygon') return [g.coordinates[0]];
+        if (g.type === 'MultiPolygon') return g.coordinates.map(p => p[0]);
+        return [];
+    }
+
+    drawWeather() {
+        const ctx = this.ctx;
+        ctx.save();
+        if (this.viewMode === 'radar') {
+            ctx.beginPath();
+            ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+            ctx.clip();
+        }
+        // NEXRAD: an equirectangular PNG; the projection is linear in lat and
+        // lon, so its corners place it exactly.
+        const rd = this.wx.radar;
+        if (this.wxRadarImg && rd && rd.bbox) {
+            const [w, s, e, n] = rd.bbox;
+            const tl = this.latLonToXY(n, w), br = this.latLonToXY(s, e);
+            if (tl && br) {
+                ctx.globalAlpha = this.viewMode === 'radar' ? 0.55 : 0.65;
+                ctx.drawImage(this.wxRadarImg, tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+                ctx.globalAlpha = 1;
+            }
+        }
+        const outline = (fc, color, dash) => {
+            if (!fc || !fc.features) return;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash(dash);
+            for (const f of fc.features) for (const r of this._wxRings(f)) { this._wxPath(r); ctx.stroke(); }
+            ctx.setLineDash([]);
+        };
+        outline(this.wx.airmet, '#e0c040', [4, 4]);
+        outline(this.wx.sigmet, '#ff8c00', []);
+        outline(this.wx.tfr, '#ff3030', [8, 3]);
+        // METARs: flight category at the station
+        const CAT = {VFR: '#00d000', MVFR: '#3a8dff', IFR: '#ff3030', LIFR: '#ff40ff'};
+        const m = this.wx.metar && this.wx.metar.items;
+        if (m) for (const st of Object.values(m)) {
+            const p = this.latLonToXY(st.lat, st.lon);
+            if (!p || !this.inView(p)) continue;
+            ctx.fillStyle = CAT[st.cat] || '#888';
+            ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+        }
+        // PIREPs: small diamonds, red when urgent
+        const pr = this.wx.pirep && this.wx.pirep.features;
+        if (pr) for (const f of pr) {
+            const [lon, lat] = f.geometry.coordinates;
+            const p = this.latLonToXY(lat, lon);
+            if (!p || !this.inView(p)) continue;
+            ctx.fillStyle = f.properties.urgent ? '#ff3030' : '#d0d0ff';
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y - 5); ctx.lineTo(p.x + 4, p.y); ctx.lineTo(p.x, p.y + 5); ctx.lineTo(p.x - 4, p.y);
+            ctx.closePath(); ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    // What weather is under a click: a METAR station (with its TAF), a PIREP,
+    // or the TFR / SIGMET / AIRMET areas containing the point.
+    wxAt(x, y) {
+        const esc = (v) => String(v ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+        const near = (lat, lon, px) => { const p = this.latLonToXY(lat, lon); return p && Math.hypot(p.x - x, p.y - y) < px; };
+        const src = (prod) => prod && prod.src ? ` <span class="dim">(${esc(prod.src)}, ${Math.round((prod.age_s || 0) / 60)} min old)</span>` : '';
+        const m = this.wx.metar && this.wx.metar.items;
+        if (m) for (const st of Object.values(m)) {
+            if (!near(st.lat, st.lon, 10)) continue;
+            const taf = this.wx.taf && this.wx.taf.items && this.wx.taf.items[st.icao];
+            return `<b>${esc(st.icao)}</b> ${esc(st.name || '')} · ${esc(st.cat || '?')}${src(this.wx.metar)}<br>${esc(st.raw)}`
+                 + (taf ? `<br><span class="dim">${esc(taf.raw)}</span>` : '');
+        }
+        const pr = this.wx.pirep && this.wx.pirep.features;
+        if (pr) for (const f of pr) {
+            const [lon, lat] = f.geometry.coordinates;
+            if (near(lat, lon, 9)) return `<b>PIREP</b>${src(this.wx.pirep)}<br>${esc(f.properties.raw)}`;
+        }
+        // Areas: ray-cast point-in-polygon in screen space
+        const inside = (ring) => {
+            const pts = ring.map(([lon, lat]) => this.latLonToXY(lat, lon)).filter(Boolean);
+            let c = false;
+            for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+                const a = pts[i], b = pts[j];
+                if ((a.y > y) !== (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x) c = !c;
+            }
+            return c;
+        };
+        const lines = [];
+        const areas = [['tfr', 'TFR', p => `${esc(p.notam || '')} ${esc(p.title || '')}`],
+                       ['sigmet', 'SIGMET', p => `${esc(p.hazard || '')} ${p.top_ft ? 'to FL' + Math.round(p.top_ft / 100) : ''}`],
+                       ['airmet', 'G-AIRMET', p => `${esc(p.hazard || '')} ${esc(p.severity || '')} ${p.base_ft != null ? Math.round(p.base_ft / 100) : ''}-${p.top_ft != null ? Math.round(p.top_ft / 100) : ''}`]];
+        for (const [k, label, fmt] of areas) {
+            const fc = this.wx[k];
+            if (!fc || !fc.features) continue;
+            for (const f of fc.features) if (this._wxRings(f).some(inside)) lines.push(`<b>${label}</b> ${fmt(f.properties)}`);
+        }
+        return lines.length ? lines.join('<br>') + '<br><span class="dim">Weather is informational, not for flight.</span>' : null;
     }
 
     formatAircraftType(track) {

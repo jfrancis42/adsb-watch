@@ -410,6 +410,18 @@ relay saw it has no waypoints, and says so. A
 route that does not fit the aircraft is never shown as fact -- only in that
 box, marked as not fitting.
 
+## Weather
+
+The **WX** button (top bar; remembered per browser) overlays the weather
+adsb-hub collects for 250 NM around home: NEXRAD radar, METAR stations as dots
+coloured by flight category (VFR green, MVFR blue, IFR red, LIFR magenta),
+TFRs (red, dashed), SIGMETs (orange), G-AIRMETs (yellow, dashed) and PIREPs
+(diamonds, red when urgent). Click a station for its METAR and TAF, a PIREP for
+its text, or anywhere inside a TFR / SIGMET / AIRMET for what covers that point.
+Every product says where it came from (internet, or FIS-B over 978 MHz) and
+how old it is. The browser gets it through this server's `/wx/*`, which passes
+adsb-hub's `/wx` through with a one-minute cache. Informational, not for flight.
+
 ## Caching
 
 All slow lookups are cached on disk (default 7 days, override with `--cache-ttl-days`):
