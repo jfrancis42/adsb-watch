@@ -117,12 +117,20 @@ class RadarDisplay {
         // Weather (adsb-hub /wx, through this page's server): off until the
         // WX button turns it on; remembered per browser.
         this.wx = {};
-        this.wxOn = false;
+        this.wxOn = false;                 // true while ANY weather layer is on
         this.wxTimer = null;
-        try { this.wxOn = localStorage.getItem('adsb.wx') === 'on'; } catch (e) { /* private mode */ }
-        const wxBtn = document.getElementById('wx-toggle');
-        if (wxBtn) wxBtn.addEventListener('click', () => this.setWeather(!this.wxOn));
-        this.setWeather(this.wxOn);
+        // Each overlay toggles on its own (owner, 2026-10-06), remembered per
+        // browser. The old single WX switch migrates to "all on".
+        this.wxLayers = {radar: false, metar: false, tfr: false, sigmet: false, pirep: false};
+        try {
+            const saved = JSON.parse(localStorage.getItem('adsb.wx.layers') || 'null');
+            if (saved) Object.assign(this.wxLayers, saved);
+            else if (localStorage.getItem('adsb.wx') === 'on')
+                for (const k in this.wxLayers) this.wxLayers[k] = true;
+        } catch (e) { /* private mode */ }
+        for (const b of document.querySelectorAll('.wxbtn'))
+            b.addEventListener('click', () => this.toggleWxLayer(b.dataset.layer));
+        this.applyWeather();
 
         // Click an aircraft: its route (where it is going) in a box and on the
         // scope. Click it again, or empty sky, to clear.
@@ -1455,21 +1463,37 @@ class RadarDisplay {
     // outlines and PIREPs. Each product says where it came from (internet,
     // or FIS-B over 978 MHz once the receiver hears it). NOT FOR FLIGHT.
 
-    setWeather(on) {
-        this.wxOn = on;
-        try { localStorage.setItem('adsb.wx', on ? 'on' : 'off'); } catch (e) { /* private mode */ }
-        const b = document.getElementById('wx-toggle');
-        if (b) { b.textContent = on ? 'WX: ON' : 'WX: OFF'; b.classList.toggle('on', on); }
+    toggleWxLayer(name) {
+        if (!(name in this.wxLayers)) return;
+        this.wxLayers[name] = !this.wxLayers[name];
+        try { localStorage.setItem('adsb.wx.layers', JSON.stringify(this.wxLayers)); } catch (e) { /* private */ }
+        this.applyWeather(name);
+    }
+
+    // Which products each toggle needs.
+    static WX_PRODUCTS = {radar: ['radar'], metar: ['metar', 'taf'], tfr: ['tfr'],
+                          sigmet: ['sigmet', 'airmet'], pirep: ['pirep']};
+
+    wxWanted() {
+        return Object.entries(this.wxLayers).filter(([, on]) => on)
+            .flatMap(([k]) => RadarDisplay.WX_PRODUCTS[k]);
+    }
+
+    applyWeather(justTurned) {
+        this.wxOn = Object.values(this.wxLayers).some(Boolean);
+        for (const b of document.querySelectorAll('.wxbtn'))
+            b.classList.toggle('on', !!this.wxLayers[b.dataset.layer]);
         clearInterval(this.wxTimer);
-        if (on) {
-            this.loadWeather();
+        if (this.wxOn) {
+            // Load what the layer just turned on needs (or everything wanted).
+            this.loadWeather(justTurned && this.wxLayers[justTurned]
+                             ? RadarDisplay.WX_PRODUCTS[justTurned] : undefined);
             // Changes are PUSHED (wx_changed); this slow poll only covers a
             // missed push or a reconnect.
             this.wxTimer = setInterval(() => this.loadWeather(), 300000);
-        } else {
-            this.wxSelected = null;
-            this.updateInfo();
         }
+        this.wxSelected = null;
+        this.updateInfo();
     }
 
     // `only`: the products the server just said changed (pushed over the
@@ -1479,8 +1503,8 @@ class RadarDisplay {
             try { const r = await fetch(`/wx/${p}`, {cache: 'no-cache'}); return r.ok ? await r.json() : null; }
             catch (e) { return null; }
         };
-        const all = ['metar', 'taf', 'tfr', 'sigmet', 'airmet', 'pirep', 'radar'];
-        const names = only && only.length ? all.filter(n => only.includes(n)) : all;
+        const wanted = this.wxWanted();
+        const names = only && only.length ? wanted.filter(n => only.includes(n)) : wanted;
         if (!names.length) return;
         const got = await Promise.all(names.map(get));
         names.forEach((n, i) => { if (got[i]) this.wx[n] = got[i]; });
@@ -1521,8 +1545,9 @@ class RadarDisplay {
         }
         // NEXRAD: an equirectangular PNG; the projection is linear in lat and
         // lon, so its corners place it exactly.
+        const L = this.wxLayers;
         const rd = this.wx.radar;
-        if (this.wxRadarImg && rd && rd.bbox) {
+        if (L.radar && this.wxRadarImg && rd && rd.bbox) {
             const [w, s, e, n] = rd.bbox;
             const tl = this.latLonToXY(n, w), br = this.latLonToXY(s, e);
             if (tl && br) {
@@ -1539,12 +1564,14 @@ class RadarDisplay {
             for (const f of fc.features) for (const r of this._wxRings(f)) { this._wxPath(r); ctx.stroke(); }
             ctx.setLineDash([]);
         };
-        outline(this.wx.airmet, '#e0c040', [4, 4]);
-        outline(this.wx.sigmet, '#ff8c00', []);
-        outline(this.wx.tfr, '#ff3030', [8, 3]);
+        if (L.sigmet) {
+            outline(this.wx.airmet, '#e0c040', [4, 4]);
+            outline(this.wx.sigmet, '#ff8c00', []);
+        }
+        if (L.tfr) outline(this.wx.tfr, '#ff3030', [8, 3]);
         // METARs: flight category at the station
         const CAT = {VFR: '#00d000', MVFR: '#3a8dff', IFR: '#ff3030', LIFR: '#ff40ff'};
-        const m = this.wx.metar && this.wx.metar.items;
+        const m = L.metar && this.wx.metar && this.wx.metar.items;
         if (m) for (const st of Object.values(m)) {
             const p = this.latLonToXY(st.lat, st.lon);
             if (!p || !this.inView(p)) continue;
@@ -1553,7 +1580,7 @@ class RadarDisplay {
             ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
         }
         // PIREPs: small diamonds, red when urgent
-        const pr = this.wx.pirep && this.wx.pirep.features;
+        const pr = L.pirep && this.wx.pirep && this.wx.pirep.features;
         if (pr) for (const f of pr) {
             const [lon, lat] = f.geometry.coordinates;
             const p = this.latLonToXY(lat, lon);
@@ -1572,14 +1599,15 @@ class RadarDisplay {
         const esc = (v) => String(v ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
         const near = (lat, lon, px) => { const p = this.latLonToXY(lat, lon); return p && Math.hypot(p.x - x, p.y - y) < px; };
         const src = (prod) => prod && prod.src ? ` <span class="dim">(${esc(prod.src)}, ${Math.round((prod.age_s || 0) / 60)} min old)</span>` : '';
-        const m = this.wx.metar && this.wx.metar.items;
+        const L = this.wxLayers;
+        const m = L.metar && this.wx.metar && this.wx.metar.items;
         if (m) for (const st of Object.values(m)) {
             if (!near(st.lat, st.lon, 10)) continue;
             const taf = this.wx.taf && this.wx.taf.items && this.wx.taf.items[st.icao];
             return `<b>${esc(st.icao)}</b> ${esc(st.name || '')} · ${esc(st.cat || '?')}${src(this.wx.metar)}<br>${esc(st.raw)}`
                  + (taf ? `<br><span class="dim">${esc(taf.raw)}</span>` : '');
         }
-        const pr = this.wx.pirep && this.wx.pirep.features;
+        const pr = L.pirep && this.wx.pirep && this.wx.pirep.features;
         if (pr) for (const f of pr) {
             const [lon, lat] = f.geometry.coordinates;
             if (near(lat, lon, 9)) return `<b>PIREP</b>${src(this.wx.pirep)}<br>${esc(f.properties.raw)}`;
@@ -1599,6 +1627,7 @@ class RadarDisplay {
                        ['sigmet', 'SIGMET', p => `${esc(p.hazard || '')} ${p.top_ft ? 'to FL' + Math.round(p.top_ft / 100) : ''}`],
                        ['airmet', 'G-AIRMET', p => `${esc(p.hazard || '')} ${esc(p.severity || '')} ${p.base_ft != null ? Math.round(p.base_ft / 100) : ''}-${p.top_ft != null ? Math.round(p.top_ft / 100) : ''}`]];
         for (const [k, label, fmt] of areas) {
+            if (!L[k === 'airmet' ? 'sigmet' : k]) continue;
             const fc = this.wx[k];
             if (!fc || !fc.features) continue;
             for (const f of fc.features) if (this._wxRings(f).some(inside)) lines.push(`<b>${label}</b> ${fmt(f.properties)}`);

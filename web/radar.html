@@ -74,7 +74,7 @@
             cursor: pointer;
         }
 
-        #wx-toggle {
+        .wxbtn {
             background: #001100;
             color: #0f0;
             border: 1px solid #0f0;
@@ -83,7 +83,9 @@
             font-size: 12px;
             cursor: pointer;
         }
-        #wx-toggle.on {
+        .wxgroup { white-space: nowrap; display: inline-flex; }
+        .wxbtn + .wxbtn { border-left: 0; }
+        .wxbtn.on {
             background: #0f0;
             color: #001100;
             box-shadow: 0 0 5px #0f0;
@@ -332,7 +334,9 @@
             </div>
             <div class="right">
                 <span>
-                    <button id="wx-toggle" type="button" title="Weather: radar, METARs, TFRs, SIGMETs/AIRMETs, PIREPs">WX: OFF</button>
+                    <span class="wxgroup" title="Weather overlays -- each on its own (not for flight)">
+                        <button class="wxbtn" type="button" data-layer="radar" title="NEXRAD radar">RADAR</button><button class="wxbtn" type="button" data-layer="metar" title="METAR stations by flight category; click for METAR + TAF">METAR</button><button class="wxbtn" type="button" data-layer="tfr" title="Temporary flight restrictions">TFR</button><button class="wxbtn" type="button" data-layer="sigmet" title="SIGMETs and G-AIRMETs">SIG/AIR</button><button class="wxbtn" type="button" data-layer="pirep" title="Pilot reports">PIREP</button>
+                    </span>
                 </span>
                 <span>
                     View:

@@ -412,10 +412,12 @@ box, marked as not fitting.
 
 ## Weather
 
-The **WX** button (top bar; remembered per browser) overlays the weather
-adsb-hub collects for 250 NM around home: NEXRAD radar, METAR stations as dots
-coloured by flight category (VFR green, MVFR blue, IFR red, LIFR magenta),
-TFRs (red, dashed), SIGMETs (orange), G-AIRMETs (yellow, dashed) and PIREPs
+Five buttons in the top bar -- **RADAR**, **METAR**, **TFR**, **SIG/AIR**,
+**PIREP** -- each turn one overlay on or off (remembered per browser; only the
+products for layers that are on are fetched). They draw the weather adsb-hub
+collects for 250 NM around home: NEXRAD radar, METAR stations as dots coloured
+by flight category (VFR green, MVFR blue, IFR red, LIFR magenta), TFRs (red,
+dashed), SIGMETs (orange) and G-AIRMETs (yellow, dashed), and PIREPs
 (diamonds, red when urgent). Click a station for its METAR and TAF, a PIREP for
 its text, or anywhere inside a TFR / SIGMET / AIRMET for what covers that point.
 Every product says where it came from (internet, or FIS-B over 978 MHz) and
