@@ -363,7 +363,8 @@ class RadarServer:
     # waypoints: {"cmd": "filed", "ref": "<TFMS flightRef>"}. The browser
     # cannot reach adsb-hub (public viewers are outside the LAN), so the
     # server fetches /swim/flight/<ref> from the hub and answers
-    # {"type": "filed", "ref", "wp": [[lat, lon]...], "route": "<string>"}.
+    # {"type": "filed", "ref", "wp": [[lat, lon]...], "route": "<string>",
+    # "wp_src": "filed" | "route"}.
     # Cached a minute per ref: several viewers clicking the same aircraft
     # cost the hub one request.
     FILED_TTL_S = 60.0
@@ -377,7 +378,7 @@ class RadarServer:
         hit = self.filed_cache.get(ref)
         if hit and now - hit[0] < self.FILED_TTL_S:
             return hit[1]
-        out = {'ref': ref, 'wp': [], 'route': None}
+        out = {'ref': ref, 'wp': [], 'route': None, 'wp_src': None}
         try:
             with urllib.request.urlopen(self._filed_url(ref), timeout=5) as r:
                 fl = (json.load(r).get('flights') or [])
@@ -385,6 +386,10 @@ class RadarServer:
                 out['wp'] = [p for p in (fl[0].get('wp') or [])
                              if isinstance(p, list) and len(p) == 2][:2000]
                 out['route'] = fl[0].get('route')
+                # "filed": the plan's own waypoints; "route": derived by the
+                # relay from the route string's fixes (airways and procedures
+                # drawn straight between them).
+                out['wp_src'] = fl[0].get('wp_src') or ('filed' if out['wp'] else None)
         except Exception as exc:          # noqa: BLE001 -- answer empty, never stall
             out['error'] = type(exc).__name__
         self.filed_cache[ref] = (now, out)

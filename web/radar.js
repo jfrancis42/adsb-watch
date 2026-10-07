@@ -269,7 +269,8 @@ class RadarDisplay {
             } else if (data.type === 'center_result') {
                 this.handleCenterResult(data);
             } else if (data.type === 'filed') {
-                this.filed[data.ref] = {wp: data.wp || [], route: data.route || null};
+                this.filed[data.ref] = {wp: data.wp || [], route: data.route || null,
+                                        wpSrc: data.wp_src || null, at: Date.now()};
                 this.updateInfo();
             }
         };
@@ -1278,7 +1279,11 @@ class RadarDisplay {
         const have = this.filed[r.ref];
         // An answer is kept; a request unanswered for 10 s (a reconnect ate
         // it) is asked again.
-        if (have && (!have.pending || Date.now() - have.pending < 10000)) return;
+        // An answer WITHOUT waypoints is asked again after a minute: the relay
+        // derives them from the route string shortly after it first sees a plan.
+        if (have && !have.pending && (!have.wp || have.wp.length < 2)
+            && Date.now() - (have.at || 0) > 60000) { /* fall through: ask again */ }
+        else if (have && (!have.pending || Date.now() - have.pending < 10000)) return;
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
         this.filed[r.ref] = { pending: Date.now() };
         try { this.ws.send(JSON.stringify({ cmd: 'filed', ref: r.ref })); } catch (e) { /* retried */ }
@@ -1414,7 +1419,9 @@ class RadarDisplay {
                 else {
                     if (f.route) lines.push(`<span class="dim">${esc(f.route)}</span>`);
                     if (!f.wp || f.wp.length < 2)
-                        lines.push('<span class="dim">no filed waypoints (plan filed before the relay saw it): line shows direction only</span>');
+                        lines.push('<span class="dim">no waypoints yet: line shows direction only</span>');
+                    else if (f.wpSrc === 'route')
+                        lines.push('<span class="dim">line drawn from the route\'s fixes (FAA NASR); airways and procedures are straight between them</span>');
                 }
             }
         }
