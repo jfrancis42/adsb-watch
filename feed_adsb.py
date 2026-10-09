@@ -30,6 +30,8 @@ SBS_F_TRK     = 13
 SBS_F_LAT     = 14
 SBS_F_LON     = 15
 SBS_F_VRATE   = 16
+# Field 22 (index 21): IsOnGround, "-1"/"1" true, "0" false, blank unknown.
+SBS_F_GROUND  = 21
 
 
 class SbsFeeder(threading.Thread):
@@ -113,6 +115,11 @@ class SbsFeeder(threading.Thread):
         maybe(SBS_F_LAT,   'lat',        float)
         maybe(SBS_F_LON,   'lon',        float)
         maybe(SBS_F_VRATE, 'vrate_fpm',  float)
+        g = row[SBS_F_GROUND].strip() if SBS_F_GROUND < len(row) else ''
+        if g in ('-1', '1'):
+            kw['on_ground'] = True
+        elif g == '0':
+            kw['on_ground'] = False
 
         self.engine.update_aircraft(icao, **kw)
         self.engine.bump_count(self.name_id)

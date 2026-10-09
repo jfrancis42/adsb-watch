@@ -251,10 +251,16 @@ def canonical_to_kwargs(ac: dict):
     if lat is not None and lon is not None:
         kw['lat'], kw['lon'] = lat, lon
 
+    cat = (ac.get('category') or '').strip().upper()
+    if cat:
+        kw['category'] = cat
     alt = ac.get('alt_baro')
     if alt == 'ground':
         kw['alt_ft'] = 0.0
+        kw['on_ground'] = True
     else:
+        if alt is not None:
+            kw['on_ground'] = False
         alt_n = _num(alt)
         if alt_n is None:
             alt_n = _num(ac.get('alt_geom'))

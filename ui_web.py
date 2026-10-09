@@ -632,7 +632,15 @@ class RadarServer:
                 'phase': t.phase,
                 'airport': t.airport,
                 'runway': t.runway,
+                # Traffic conflict (conflict.py), every frame: null clears it.
+                'conflict': t.conflict,
             }
+            if t.conflict:
+                d['conflict_rule'] = t.conflict_rule
+                d['conflict_with'] = list(t.conflict_with)
+                d['conflict_h_nm'] = r(t.conflict_h_nm, 2)
+                d['conflict_v_ft'] = r(t.conflict_v_ft, 0)
+                d['conflict_t_s'] = r(t.conflict_t_s, 0)
             # Registry metadata never changes for a given ICAO, so send it
             # once per aircraft instead of four times a second.  The connect
             # frame always carries it for everything currently up, so a client

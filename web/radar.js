@@ -2,6 +2,9 @@
 // WebSocket client that renders aircraft on a circular radar scope
 
 const PHOSPHOR_GREEN = '#00ff00';
+// Traffic conflicts (conflict.py): projected inside the separation / inside it now.
+const CONFLICT_WARN = '#ffff00';
+const CONFLICT_ALERT = '#ff2020';
 const PHOSPHOR_DIM = '#003300';
 const BACKGROUND = '#000000';
 const GRID_COLOR = '#00aa00';  // Brighter for visibility in sunlight
@@ -88,6 +91,17 @@ class RadarDisplay {
 
         // Track aircraft states for sound triggers
         this.aircraftStates = {}; // {icao: {wasApproaching: bool, wasInRange: bool}}
+
+        // Traffic-conflict alarm (owner, 2026-10-08): sounds for as long as a
+        // conflict lasts, separately switchable for light (VFR, 500 ft) and
+        // IFR (3/5 NM x 1000 ft) conflicts; remembered per browser.
+        this.alarmVfr = true;
+        this.alarmIfr = true;
+        try {
+            if (localStorage.getItem('adsb.alarm.vfr') === 'off') this.alarmVfr = false;
+            if (localStorage.getItem('adsb.alarm.ifr') === 'off') this.alarmIfr = false;
+        } catch (e) { /* private mode */ }
+        this.alarmNextAt = 0;
 
         // Scope-centre control. The centre is server-side state (one engine
         // observer), so this is a request/echo pair, not local state: we send
@@ -185,6 +199,28 @@ class RadarDisplay {
         document.getElementById('sound-leave').addEventListener('change', (e) => {
             this.soundLeave = e.target.checked;
         });
+
+        for (const [id, key, prop] of [['alarm-vfr', 'adsb.alarm.vfr', 'alarmVfr'],
+                                       ['alarm-ifr', 'adsb.alarm.ifr', 'alarmIfr']]) {
+            const box = document.getElementById(id);
+            box.checked = this[prop];
+            box.addEventListener('change', (e) => {
+                this[prop] = e.target.checked;
+                try { localStorage.setItem(key, e.target.checked ? 'on' : 'off'); } catch (err) {}
+            });
+        }
+        // Browsers keep audio suspended until the page has seen a gesture, so
+        // any click or key anywhere unlocks it -- an alarm that cannot sound
+        // is worse than none, hence also the banner in conflictAlarm().
+        const unlock = () => {
+            try { this.getAudioContext().resume(); } catch (e) {}
+        };
+        document.addEventListener('pointerdown', unlock);
+        document.addEventListener('keydown', unlock);
+        document.getElementById('audio-unlock').addEventListener('click', unlock);
+        setInterval(() => {
+            try { this.conflictAlarm(); } catch (err) { console.error('conflict alarm:', err); }
+        }, 200);
 
         // Centre selector: Enter applies, Escape restores the current centre.
         const centerInput = document.getElementById('center-input');
@@ -302,6 +338,65 @@ class RadarDisplay {
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         }
         return this.audioContext;
+    }
+
+    // ---- traffic-conflict alarm --------------------------------------
+
+    // One tone burst. Square wave: harsher than the pleasant chimes on
+    // purpose -- it has to be heard over them and mean something else.
+    tone(freq, start, dur, vol = 0.35) {
+        const ctx = this.getAudioContext();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(freq, start);
+        gain.gain.setValueAtTime(vol, start);
+        gain.gain.setValueAtTime(vol, start + dur - 0.02);
+        gain.gain.linearRampToValueAtTime(0.0001, start + dur);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(start);
+        osc.stop(start + dur);
+    }
+
+    // Called every 200 ms. Red (inside the separation now): a fast hi-lo
+    // two-tone, repeating every 0.6 s. Yellow (projected): one beep every
+    // 1.5 s. It repeats for as long as the condition lasts -- an alarm, not
+    // a notification -- and stops the moment it clears or is switched off.
+    conflictAlarm() {
+        // Only what is on THIS screen counts (owner, 2026-10-08): an aircraft
+        // outside the current view never sounds the alarm, whatever it is
+        // doing. A pair straddling the edge still alarms for its visible half.
+        const on = (t) => t.conflict && this.onScreen(t) &&
+            ((t.conflict_rule === 'ifr') ? this.alarmIfr : this.alarmVfr);
+        let alert = false, warn = false;
+        for (const t of this.tracks || []) {
+            if (!on(t)) continue;
+            if (t.conflict === 'alert') alert = true;
+            else if (t.conflict === 'warn') warn = true;
+        }
+        const banner = document.getElementById('audio-unlock');
+        const ctx = this.audioContext;
+        const blocked = !ctx || ctx.state !== 'running';
+        banner.style.display = (alert || warn) && blocked ? 'block' : 'none';
+        this.alarmState = alert ? 'alert' : warn ? 'warn' : null;   // for tests
+        if (!alert && !warn) { this.alarmNextAt = 0; return; }
+        const now = performance.now();
+        if (now < this.alarmNextAt) return;
+        const c = this.getAudioContext();
+        if (c.state !== 'running') { c.resume().catch(() => {}); return; }
+        const t0 = c.currentTime + 0.01;
+        if (alert) {
+            this.tone(1050, t0, 0.14);
+            this.tone(700, t0 + 0.15, 0.14);
+            this.tone(1050, t0 + 0.30, 0.14);
+            this.tone(700, t0 + 0.45, 0.14);
+            this.alarmNextAt = now + 600;
+        } else {
+            this.tone(880, t0, 0.18, 0.25);
+            this.alarmNextAt = now + 1500;
+        }
+        this.alarmPlayed = (this.alarmPlayed || 0) + 1;              // for tests
     }
 
     // Pleasant ascending tone for "approaching"
@@ -774,6 +869,10 @@ class RadarDisplay {
             const sel = this.selected && this.tracks.find(t => t.icao === this.selected);
             if (sel) this.drawRoute(sel);
 
+            // Conflict pairs joined by a line in the pair's colour, under the
+            // symbols so the aircraft themselves stay readable.
+            this.drawConflictLinks();
+
             // Draw aircraft (top layer)
             for (const track of this.tracks) {
                 this.drawAircraft(track);
@@ -1027,6 +1126,17 @@ class RadarDisplay {
     // the map fills the whole window, so the bound is the canvas rectangle
     // (plus a margin, so a symbol or label straddling the edge is drawn
     // partly rather than popping in and out whole).
+    // Is this aircraft inside the visible picture right now -- the scope
+    // circle on the radar, the canvas itself over a map (no label margin)?
+    onScreen(t) {
+        if (t.lat === null || t.lon === null) return false;
+        const pos = this.latLonToXY(t.lat, t.lon);
+        if (!pos) return false;
+        if (this.viewMode === 'radar')
+            return Math.hypot(pos.x, pos.y) <= this.radius;
+        return Math.abs(pos.x) <= this.cx && Math.abs(pos.y) <= this.cy;
+    }
+
     inView(pos, margin = 0) {
         if (this.viewMode === 'radar') {
             return Math.sqrt(pos.x * pos.x + pos.y * pos.y) <= this.radius + margin;
@@ -1092,8 +1202,49 @@ class RadarDisplay {
         ctx.stroke();
     }
 
+    drawConflictLinks() {
+        const byIcao = {};
+        for (const t of this.tracks) byIcao[t.icao] = t;
+        const ctx = this.ctx;
+        for (const t of this.tracks) {
+            if (!t.conflict || !t.conflict_with) continue;
+            const a = this.latLonToXY(t.lat, t.lon);
+            if (!a) continue;
+            for (const other of t.conflict_with) {
+                if (other < t.icao) continue;              // each pair once
+                const o = byIcao[other];
+                if (!o || o.lat === null) continue;
+                const b = this.latLonToXY(o.lat, o.lon);
+                if (!b) continue;
+                const red = t.conflict === 'alert' && o.conflict === 'alert';
+                ctx.save();
+                ctx.strokeStyle = red ? CONFLICT_ALERT : CONFLICT_WARN;
+                ctx.lineWidth = 2;
+                ctx.setLineDash(red ? [] : [6, 4]);
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y);
+                ctx.lineTo(b.x, b.y);
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+    }
+
+    // Short text for a conflict: what the separation is/will be, and when.
+    conflictLabel(t) {
+        if (!t.conflict) return null;
+        const when = t.conflict === 'alert' ? 'NOW' : `in ${Math.round(t.conflict_t_s || 0)}s`;
+        const v = Math.round(t.conflict_v_ft || 0);
+        if (t.conflict_rule === 'ifr')
+            return `IFR ${(t.conflict_h_nm || 0).toFixed(1)}nm ${v}ft ${when}`;
+        const h = Math.round((t.conflict_h_nm || 0) * 6076);
+        return `TFC ${Math.round(Math.hypot(h, v))}ft ${when}`;
+    }
+
     drawAircraft(track) {
         if (track.lat === null || track.lon === null) return;
+        const conflictColor = track.conflict === 'alert' ? CONFLICT_ALERT
+                            : track.conflict === 'warn' ? CONFLICT_WARN : null;
 
         const pos = this.latLonToXY(track.lat, track.lon);
         if (!pos) return;
@@ -1164,12 +1315,12 @@ class RadarDisplay {
         ctx.rotate(courseRad);
 
         // Arrow shape (pointing up = north)
-        ctx.fillStyle = PHOSPHOR_GREEN;
-        ctx.strokeStyle = PHOSPHOR_GREEN;
+        ctx.fillStyle = conflictColor || PHOSPHOR_GREEN;
+        ctx.strokeStyle = conflictColor || PHOSPHOR_GREEN;
         ctx.lineWidth = 2;
 
-        // Dim if predicted/stale
-        if (track.predicted) {
+        // Dim if predicted/stale -- never a conflict: it must stay bright.
+        if (track.predicted && !conflictColor) {
             ctx.globalAlpha = 0.5;
         }
 
@@ -1183,6 +1334,21 @@ class RadarDisplay {
         ctx.stroke();
 
         ctx.restore();
+
+        // A conflict also gets a thick ring, pulsing when red, so it reads at
+        // a glance even in a crowded picture.
+        if (conflictColor) {
+            ctx.save();
+            const pulse = track.conflict === 'alert'
+                ? 0.55 + 0.45 * Math.abs(Math.sin(performance.now() / 180)) : 1;
+            ctx.globalAlpha = pulse;
+            ctx.strokeStyle = conflictColor;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, 18, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+        }
 
         // Data label
         ctx.save();
@@ -1199,11 +1365,12 @@ class RadarDisplay {
         const speed = track.speed_kt !== null ? Math.round(track.speed_kt * 1.15078) : '---'; // kt to mph
         const type = this.formatAircraftType(track);
 
-        const label = `${alt}' ${speed}mph\n${type}`;
+        const cl = this.conflictLabel(track);
+        const label = `${alt}' ${speed}mph\n${type}` + (cl ? `\n${cl}` : '');
 
         const overMap = this.viewMode !== 'radar';
-        ctx.fillStyle = overMap ? MAP_LABEL_COLOR : TEXT_COLOR;
-        ctx.font = `${overMap ? 'bold ' : ''}${LABEL_FONT_PX}px "Courier New"`;
+        ctx.fillStyle = conflictColor || (overMap ? MAP_LABEL_COLOR : TEXT_COLOR);
+        ctx.font = `${overMap || conflictColor ? 'bold ' : ''}${LABEL_FONT_PX}px "Courier New"`;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.lineJoin = 'round';

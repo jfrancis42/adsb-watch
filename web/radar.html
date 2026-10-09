@@ -43,6 +43,13 @@
         }
 
         /* Indicator lights */
+        #audio-unlock {
+            display: none; position: fixed; top: 60px; left: 50%;
+            transform: translateX(-50%); z-index: 50; cursor: pointer;
+            background: #ff2020; color: #fff; font-weight: bold;
+            padding: 8px 16px; border: 2px solid #ffff00; border-radius: 4px;
+            font-family: "Courier New", monospace;
+        }
         .indicator {
             display: inline-flex;
             align-items: center;
@@ -418,7 +425,16 @@
                 <span>
                     <label><input type="checkbox" id="sound-leave" checked> Leave</label>
                 </span>
+                <span title="Alarm for light-aircraft conflicts (500 ft)">
+                    <label><input type="checkbox" id="alarm-vfr" checked> VFR alarm</label>
+                </span>
+                <span title="Alarm for IFR conflicts (3 NM terminal / 5 NM, 1000 ft)">
+                    <label><input type="checkbox" id="alarm-ifr" checked> IFR alarm</label>
+                </span>
             </div>
+        </div>
+        <div id="audio-unlock" title="Browsers keep sound off until the page is clicked">
+            TRAFFIC CONFLICT &mdash; alarm sound is blocked by the browser. Click here to enable it.
         </div>
         <div id="canvas-container">
             <div id="map-layer"></div>

@@ -13,6 +13,7 @@ from typing import Optional
 from geo import (haversine_nm, bearing_deg, elevation_deg,
                  closest_approach, dead_reckon)
 import phase as phase_mod
+import conflict as conflict_mod
 
 
 def _ema_angle(prev_deg: float, new_deg: float, alpha: float) -> float:
@@ -65,6 +66,11 @@ class Aircraft:
     # guess, with `plausible` (does it fit the track). Identity, like the
     # callsign: accepted from any source.
     route: Optional[dict] = None
+    # ADS-B emitter category ('A1' light ... 'A5' heavy, 'A7' rotorcraft,
+    # 'B1' glider ...) and the on-ground state. Both decide whether the
+    # aircraft is checked for traffic conflicts, and under which rule.
+    category: Optional[str] = None
+    on_ground: bool = False
 
 
 @dataclass
@@ -124,6 +130,18 @@ class Track:
     model:        Optional[str] = None
     owner:        Optional[str] = None
     route:        Optional[dict] = None   # adsb-hub `route` (+ airports o/d)
+    category:     Optional[str] = None
+    # Traffic conflict (conflict.py), None when there is none:
+    #   conflict 'warn' (projected inside the separation -> yellow) or
+    #   'alert' (inside it now -> red); rule 'vfr' (500 ft) or 'ifr'
+    #   (3/5 NM x 1000 ft); the partners' icaos; the separation at the worst
+    #   point and seconds until it.
+    conflict:      Optional[str] = None
+    conflict_rule: Optional[str] = None
+    conflict_with: tuple = ()
+    conflict_h_nm: Optional[float] = None
+    conflict_v_ft: Optional[float] = None
+    conflict_t_s:  Optional[float] = None
 
 
 @dataclass
@@ -179,6 +197,13 @@ class Engine:
         # the network every time the aircraft reappears after expiry.
         self._registry_cache = registry_cache
         self._facilities = None  # airports.Facilities snapshot or None
+        # Traffic-conflict settings (conflict.py) and the per-aircraft hold
+        # that keeps a colour up for CONFLICT_HOLD_S after the geometry last
+        # said so: a pair sitting right at a threshold would otherwise
+        # flicker -- and re-trigger the alarm -- several times a second.
+        self.conflict_lookahead_s = conflict_mod.DEFAULT_LOOKAHEAD_S
+        self.conflict_separation_ft = conflict_mod.DEFAULT_SEPARATION_FT
+        self._conflict_hold: dict = {}   # icao -> (Conflict, held_until)
 
     def report_feeder(self, name: str, status: str):
         with self._lock:
@@ -303,7 +328,9 @@ class Engine:
                         vrate_fpm=None, source: str = 'local',
                         pos_time: float | None = None,
                         fix_time: float | None = None,
-                        route: dict | None = None):
+                        route: dict | None = None,
+                        category: str | None = None,
+                        on_ground: bool | None = None):
         """Merge an aircraft update.
 
         `source` is 'local' (RTL-SDR: SBS/AVR/UAT feeders) or 'internet'
@@ -338,6 +365,8 @@ class Engine:
                 ac.callsign = callsign.strip() or ac.callsign
             if route is not None:
                 ac.route = route
+            if category:
+                ac.category = category
 
             # Position priority: internet kinematic data is suppressed while a
             # local fix is still fresh. Local data is never suppressed.
@@ -356,6 +385,7 @@ class Engine:
                 suppress_kinematics = True
 
             if not suppress_kinematics:
+                if on_ground is not None:  ac.on_ground = bool(on_ground)
                 if alt_ft   is not None:   ac.alt_ft = alt_ft
                 if course_deg is not None: ac.course_deg = course_deg
                 if speed_kt   is not None: ac.speed_kt = speed_kt
@@ -423,6 +453,7 @@ class Engine:
                        if a.lat is not None and a.lon is not None
                        and (now - (a.fix_t or a.last_pos)) <= self.expiry_s]
             tracks = [self._track_for(a, obs, now) for a in visible]
+            tracks = self._with_conflicts(tracks, visible, now)
         tracks.sort(key=lambda t: (t.distance_nm is None, t.distance_nm or 0.0))
         with self._lock:
             feeders = dict(self._feeders)
@@ -434,6 +465,58 @@ class Engine:
                         facilities=self._facilities)
 
     # ----- internals -------------------------------------------------------
+
+    CONFLICT_HOLD_S = 3.0
+
+    def _with_conflicts(self, tracks, visible, now):
+        """Run conflict.assess over this frame's positions and stamp the
+        result (held for CONFLICT_HOLD_S) onto the tracks."""
+        by_icao = {a.icao: a for a in visible}
+        # Only the airports that define terminal airspace, filtered once per
+        # frame rather than once per aircraft (261 airports x 200 tracks).
+        airports = [ap for ap in (getattr(self._facilities, 'airports', None) or ())
+                    if getattr(ap, 'type', None) in conflict_mod.TERMINAL_AIRPORT_TYPES]
+        crafts = []
+        for t in tracks:
+            a = by_icao.get(t.icao)
+            crafts.append(conflict_mod.Craft(
+                icao=t.icao, lat=t.lat, lon=t.lon, alt_ft=t.alt_ft,
+                course_deg=t.course_deg, speed_kt=t.speed_kt,
+                vrate_fpm=a.vrate_fpm if a else None,
+                category=a.category if a else None, callsign=t.callsign,
+                on_ground=a.on_ground if a else False, phase=t.phase,
+                route=t.route,
+                terminal=conflict_mod.in_terminal_airspace(
+                    t.lat, t.lon, t.alt_ft, airports),
+                airport_flow=conflict_mod.in_airport_flow(
+                    t.lat, t.lon, t.alt_ft, airports)))
+        found = conflict_mod.assess(
+            crafts, separation_ft=self.conflict_separation_ft,
+            lookahead_s=self.conflict_lookahead_s)
+        rank = {'alert': 2, 'warn': 1}
+        for icao, c in found.items():
+            self._conflict_hold[icao] = (c, now + self.CONFLICT_HOLD_S)
+        out = []
+        for t in tracks:
+            held = self._conflict_hold.get(t.icao)
+            if held and held[1] < now:
+                del self._conflict_hold[t.icao]
+                held = None
+            c = found.get(t.icao)
+            if held and (c is None or rank[held[0].level] > rank[c.level]):
+                c = held[0]
+            cat = by_icao[t.icao].category if t.icao in by_icao else None
+            if c is None:
+                out.append(replace(t, category=cat))
+            else:
+                out.append(replace(
+                    t, category=cat, conflict=c.level, conflict_rule=c.rule,
+                    conflict_with=c.partners, conflict_h_nm=c.h_nm,
+                    conflict_v_ft=c.v_ft, conflict_t_s=c.t_s))
+        # Forget holds for aircraft that have gone.
+        for icao in [k for k in self._conflict_hold if k not in by_icao]:
+            del self._conflict_hold[icao]
+        return out
 
     def _expire(self, now: float):
         dead = [k for k, a in self._aircraft.items()

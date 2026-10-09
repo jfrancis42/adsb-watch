@@ -395,6 +395,47 @@ runway geometry of nearby airports:
 Tunable thresholds live at the top of `phase.py` (lateral tolerance,
 heading tolerance, AGL ceiling, vertical-rate gates).
 
+## Traffic conflicts
+
+The web radar paints two aircraft **bright yellow** when their projected
+paths come inside the separation for the pair, and **bright red** when they
+are inside it now, joins them with a line, labels the separation and the
+time to it, and sounds an alarm for as long as it lasts (a beep every 1.5 s
+for yellow, a fast two-tone for red). `conflict.py` decides; the engine runs
+it on every snapshot.
+
+| Pair | Separation |
+|---|---|
+| light (VFR) with light | **500 ft straight-line** (3-D) |
+| light with IFR | 500 ft (ATC does not separate IFR from VFR in most airspace) |
+| IFR with IFR | **1,000 ft vertical AND 3 NM** in terminal airspace, **5 NM** outside it; not checked when either is airport traffic (below) |
+
+* **Light**: airborne, emitter category A1/A7/B1/B2/B4/B6, or no category and
+  no airline callsign (TIS-B targets are typically light GA with no ADS-B Out).
+* **IFR**: an FAA-filed plan (hub `route` src `swim`), at or above 18,000 ft,
+  category A2-A6, or an airline callsign.
+* **Terminal airspace** is approximated as below 18,000 ft within 40 NM of a
+  large or medium airport: ADS-B does not say whose airspace an aircraft is in.
+* **Airport traffic** is exempt from the IFR rule (tower and approach run
+  reduced, visual and parallel-runway separation): approach/landing/takeoff/
+  departure phase, or within 25 NM of a large or medium airport and below
+  6,000 ft above it. Checking it lit Denver's parallel arrivals red
+  continuously.
+* **Exactly 1,000 ft is legal**: reported altitudes jitter ±25 ft, so IFR
+  "inside" means less than 900 ft vertical.
+* **Only what is on screen** sounds: an aircraft outside the current view
+  never triggers the alarm (a pair straddling the edge alarms for its
+  visible half).
+* **Projection**: straight line at current track, speed and vertical rate,
+  60 s ahead. Turns are invisible to it, so pattern and formation traffic
+  will go yellow; ADS-B positions are good to roughly 100-300 ft. A warning
+  display, not a TCAS.
+* A colour holds for 3 s after the geometry clears, so a pair sitting at a
+  threshold does not flicker.
+* The **VFR alarm** and **IFR alarm** checkboxes mute each class (remembered
+  per browser). Browsers block sound until the page is clicked; while a
+  conflict is showing and sound is blocked, a red banner says so.
+
 ## Where an aircraft is going
 
 When the data comes from adsb-hub, an aircraft can carry a `route`: the FAA's
